@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<!--
+  Pipecat AI Client - RTVI WebSocket Interface
+  =============================================
+  A self-contained HTML client for connecting to Pipecat AI Server via WebSocket
+  using the RTVI (Real-Time Voice Interface) protocol.
+
+  Protocol: Binary protobuf-like encoding over WebSocket
+  Audio:    Raw PCM Float32, 16000 Hz, mono (both directions)
+
+  Usage:
+    1. Open this file in a modern browser (Chrome/Edge recommended)
+    2. Enter a phone number (default: 0909835115)
+    3. Click Connect
+    4. Grant microphone permission when prompted
+    5. Speak - bot audio and transcriptions will appear
+
+  Requirements:
+    - Modern browser with WebSocket, Web Audio API, and getUserMedia support
+    - Microphone access
+    - Network access to the Pipecat WebSocket server
+
+  Note: The Pipecat server must allow CORS for the WebSocket connection.
+        If serving this file from a different origin, ensure the server
+        accepts the Origin header in the WebSocket handshake.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pipecat AI Client</title>
+<style>
+  /* ===== Reset & Base ===== */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+    background: #0f0f1a;
+    color: #e0e0e0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ===== Header ===== */
+  .header {
+    background: linear-gradient(135deg, #1a1a4e 0%, #2d1b69 30%, #1a3a5c 70%, #0d2137 100%);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    flex-shrink: 0;
+  }
+  .header-logo {
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; font-weight: 700; color: #fff;
+    flex-shrink: 0;
+  }
+  .header h1 {
+    font-size: 1.2rem; font-weight: 600;
+    letter-spacing: 0.02em;
+    background: linear-gradient(90deg, #c4b5fd, #a5b4fc);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* ===== Status Bar ===== */
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 24px;
+    background: #14142b;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+  .status-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    transition: background 0.3s, box-shadow 0.3s;
+  }
+  .status-dot.disconnected { background: #6b7280; box-shadow: none; }
+  .status-dot.connecting   { background: #f59e0b; box-shadow: 0 0 8px #f59e0b88; animation: pulse 1.2s ease-in-out infinite; }
+  .status-dot.connected    { background: #22c55e; box-shadow: 0 0 10px #22c55e88; }
+  .status-dot.error        { background: #ef4444; box-shadow: 0 0 10px #ef444488; animation: pulse 0.8s ease-in-out infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  .status-text {
+    font-size: 0.85rem; font-weight: 500; color: #9ca3af;
+  }
+
+  /* ===== Controls ===== */
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 24px;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+  .controls label {
+    font-size: 0.8rem; color: #9ca3af; font-weight: 500;
+  }
+  .controls input[type="text"] {
+    background: #1e1e38;
+    border: 1px solid #2d2d50;
+    border-radius: 8px;
+    color: #e0e0e0;
+    padding: 9px 14px;
+    font-size: 0.9rem;
+    width: 200px;
+    outline: none;
+    transition: border-color 0.2s;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  }
+  .controls input[type="text"]:focus {
+    border-color: #6366f1;
+  }
+
+  .btn {
+    padding: 10px 22px;
+    border: none; border-radius: 8px;
+    font-size: 0.9rem; font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s, transform 0.1s, box-shadow 0.2s;
+    letter-spacing: 0.02em;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn-connect {
+    background: linear-gradient(135deg, #16a34a, #22c55e);
+    color: #fff;
+    box-shadow: 0 2px 10px rgba(34,197,94,0.3);
+  }
+  .btn-connect:hover { background: linear-gradient(135deg, #15803d, #16a34a); }
+  .btn-connect:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-disconnect {
+    background: linear-gradient(135deg, #dc2626, #ef4444);
+    color: #fff;
+    box-shadow: 0 2px 10px rgba(239,68,68,0.3);
+  }
+  .btn-disconnect:hover { background: linear-gradient(135deg, #b91c1c, #dc2626); }
+  .btn-clear {
+    background: #2d2d50; color: #9ca3af;
+    padding: 8px 16px; font-size: 0.8rem;
+  }
+  .btn-clear:hover { background: #3d3d60; color: #d1d5db; }
+
+  /* ===== Main Content ===== */
+  .main-content {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    gap: 1px;
+    background: #1a1a3a;
+  }
+
+  /* ===== Transcript Panel ===== */
+  .transcript-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: #14142b;
+    min-width: 200px;
+  }
+  .panel-header {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #6b7280;
+    padding: 10px 16px;
+    background: rgba(255,255,255,0.03);
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+    font-weight: 600;
+  }
+  .transcript-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .transcript-body::-webkit-scrollbar { width: 6px; }
+  .transcript-body::-webkit-scrollbar-track { background: transparent; }
+  .transcript-body::-webkit-scrollbar-thumb { background: #3d3d60; border-radius: 3px; }
+
+  .transcript-msg {
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 0.88rem;
+    line-height: 1.45;
+    animation: fadeIn 0.2s ease;
+    max-width: 85%;
+    word-break: break-word;
+  }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  .transcript-msg.user {
+    align-self: flex-end;
+    background: linear-gradient(135deg, #2563eb, #3b82f6);
+    color: #fff;
+    border-bottom-right-radius: 3px;
+  }
+  .transcript-msg.bot {
+    align-self: flex-start;
+    background: #1e1e38;
+    color: #d1d5db;
+    border: 1px solid #2d2d50;
+    border-bottom-left-radius: 3px;
+  }
+  .transcript-empty {
+    color: #4b5563;
+    font-style: italic;
+    text-align: center;
+    padding: 40px 20px;
+    font-size: 0.85rem;
+  }
+
+  /* ===== Debug Panel ===== */
+  .debug-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: #0a0a1e;
+    min-width: 250px;
+    border-left: 1px solid rgba(255,255,255,0.05);
+  }
+  .debug-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 16px;
+    background: rgba(255,255,255,0.03);
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+  }
+  .debug-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px 14px;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 0.75rem;
+    line-height: 1.6;
+    color: #9ca3af;
+  }
+  .debug-body::-webkit-scrollbar { width: 6px; }
+  .debug-body::-webkit-scrollbar-track { background: transparent; }
+  .debug-body::-webkit-scrollbar-thumb { background: #2d2d50; border-radius: 3px; }
+  .debug-entry {
+    padding: 2px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.02);
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .debug-entry .ts { color: #6366f1; }
+  .debug-entry.dir-send { color: #34d399; }
+  .debug-entry.dir-recv { color: #fbbf24; }
+  .debug-entry.dir-event { color: #60a5fa; }
+  .debug-entry.dir-error { color: #f87171; }
+  .debug-entry.dir-audio { color: #c084fc; }
+
+  /* ===== Responsive ===== */
+  @media (max-width: 768px) {
+    .main-content { flex-direction: column; }
+    .debug-panel { border-left: none; border-top: 1px solid rgba(255,255,255,0.05); max-height: 40vh; }
+    .transcript-panel { max-height: 40vh; }
+    .controls { flex-direction: column; align-items: flex-start; }
+    .controls input[type="text"] { width: 100%; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header class="header">
+  <div class="header-logo">P</div>
+  <h1>Pipecat AI Client</h1>
+</header>
+
+<!-- Status Bar -->
+<div class="status-bar">
+  <div class="status-dot disconnected" id="statusDot"></div>
+  <span class="status-text" id="statusText">Disconnected</span>
+  <span class="status-text" id="speakingIndicator" style="display:none;color:#22c55e;font-weight:600;">🔊 Bot speaking...</span>
+</div>
+
+<!-- Controls -->
+<div class="controls">
+  <label for="phoneInput">Phone:</label>
+  <input type="text" id="phoneInput" value="0909835115" placeholder="Enter phone number">
+  <button class="btn btn-connect" id="connectBtn" onclick="toggleConnection()">Connect</button>
+</div>
+
+<!-- Chat Text Input -->
+<div class="chat-bar" id="chatBar" style="display:none;padding:8px 16px;background:#14142b;border-top:1px solid rgba(255,255,255,0.05);flex-shrink:0;">
+  <div style="display:flex;gap:8px;">
+    <input type="text" id="chatInput" placeholder="Nhập tin nhắn text..."
+           style="flex:1;background:#1e1e38;border:1px solid #2d2d50;border-radius:8px;color:#e0e0e0;padding:8px 14px;font-size:0.9rem;outline:none;">
+    <button id="chatSendBtn" class="btn btn-connect" style="padding:8px 20px;font-size:0.85rem;">Gửi</button>
+  </div>
+</div>
+
+<!-- Hidden audio element for bot audio playback -->
+<audio id="bot-audio" autoplay></audio>
+
+<!-- Main Content -->
+<div class="main-content">
+  <!-- Conversation Transcript -->
+  <section class="transcript-panel">
+    <div class="panel-header">Conversation Transcript</div>
+    <div class="transcript-body" id="transcriptBody">
+      <div class="transcript-empty">Transcriptions will appear here...</div>
+    </div>
+  </section>
+
+  <!-- Debug Log -->
+  <section class="debug-panel">
+    <div class="debug-header-row">
+      <span class="panel-header" style="padding:0;border:none;background:none;">Debug Log</span>
+      <button class="btn btn-clear" onclick="clearLog()">Clear</button>
+    </div>
+    <div class="debug-body" id="debugBody"></div>
+  </section>
+</div>
+
+<script src="assets/pipecat-sdk.js"></script>
+<script>
+// ============================================================================
+//  Pipecat AI Client - JavaScript (Pipecat SDK)
+// ============================================================================
+
+// ---- DOM References ----
+const phoneInput = document.getElementById('phoneInput');
+const connectBtn = document.getElementById('connectBtn');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const debugBody = document.getElementById('debugBody');
+const transcriptBody = document.getElementById('transcriptBody');
+const botAudio = document.getElementById('bot-audio');
+
+// ---- Constants ----
+const CONNECT_URL = 'http://localhost:8086/connect';
+const MAX_LOG_ENTRIES = 300;
+
+// ---- State ----
+let pcClient = null;
+let currentStatus = 'disconnected';
+let transcriptEmpty = null;
+
+// ============================================================================
+//  SECTION 1: Debug Logging
+// ============================================================================
+
+function log(msg, direction) {
+  const timestamp = new Date().toISOString();
+  while (debugBody.children.length >= MAX_LOG_ENTRIES) {
+    debugBody.removeChild(debugBody.firstChild);
+  }
+  const entry = document.createElement('div');
+  entry.className = 'debug-entry';
+  if (direction) entry.classList.add('dir-' + direction);
+  const tsSpan = document.createElement('span');
+  tsSpan.className = 'ts';
+  tsSpan.textContent = timestamp;
+  entry.appendChild(tsSpan);
+  entry.appendChild(document.createTextNode(' - ' + msg));
+  debugBody.appendChild(entry);
+  debugBody.scrollTop = debugBody.scrollHeight;
+}
+
+function clearLog() {
+  debugBody.innerHTML = '';
+  log('Log cleared');
+}
+
+// ============================================================================
+//  SECTION 2: Status Management
+// ============================================================================
+
+function setStatus(status) {
+  currentStatus = status;
+  statusDot.className = 'status-dot ' + status;
+  const labels = {
+    disconnected: 'Disconnected',
+    connecting: 'Connecting...',
+    connected: 'Connected',
+    error: 'Error'
+  };
+  statusText.textContent = labels[status] || status;
+  if (status === 'connected') {
+    connectBtn.textContent = 'Disconnect';
+    connectBtn.className = 'btn btn-disconnect';
+    connectBtn.disabled = false;
+  } else if (status === 'connecting') {
+    connectBtn.textContent = 'Connecting...';
+    connectBtn.disabled = true;
+  } else {
+    connectBtn.textContent = 'Connect';
+    connectBtn.className = 'btn btn-connect';
+    connectBtn.disabled = (status === 'connecting');
+  }
+}
+
+// ============================================================================
+//  SECTION 3: Transcript
+// ============================================================================
+
+function addTranscript(text, speaker) {
+  if (transcriptEmpty) {
+    transcriptEmpty.remove();
+    transcriptEmpty = null;
+  }
+  const msgDiv = document.createElement('div');
+  msgDiv.className = 'transcript-msg ' + speaker;
+  msgDiv.textContent = text;
+  transcriptBody.appendChild(msgDiv);
+  transcriptBody.scrollTop = transcriptBody.scrollHeight;
+}
+
+// ============================================================================
+//  SECTION 4: Bot Audio Setup
+// ============================================================================
+
+function setupBotAudio(track) {
+  if (botAudio.srcObject) {
+    const existingTracks = botAudio.srcObject.getAudioTracks();
+    for (let i = 0; i < existingTracks.length; i++) {
+      if (existingTracks[i].id === track.id) return;
+    }
+  }
+  botAudio.srcObject = new MediaStream([track]);
+  log('Bot audio track ready', 'audio');
+}
+
+// ============================================================================
+//  SECTION 5: Bot Client Connection
+// ============================================================================
+
+async function connectBot() {
+  const rawPhone = phoneInput.value.trim();
+  if (!rawPhone) {
+    log('Please enter a phone number', 'error');
+    return;
+  }
+
+  setStatus('connecting');
+  log('Starting Pipecat Client...', 'event');
+
+  try {
+    pcClient = new BotClient({
+      transport: new WebSocketTransport(),
+      enableMic: true,
+      enableCam: false,
+      callbacks: {
+        onConnected: () => {
+          log('Transport connected', 'event');
+        },
+        onDisconnected: () => {
+          log('Transport disconnected', 'event');
+          if (currentStatus !== 'error') {
+            setStatus('disconnected');
+          }
+        },
+        onBotReady: (data) => {
+          log('Bot ready: ' + JSON.stringify(data), 'event');
+          setStatus('connected');
+          // Try to get bot audio track from existing tracks
+          if (pcClient) {
+            const tracks = pcClient.tracks();
+            if (tracks.bot && tracks.bot.audio) {
+              setupBotAudio(tracks.bot.audio);
+            }
+          }
+        },
+        onUserTranscript: (data) => {
+          if (data && data.final && data.text) {
+            addTranscript(data.text, 'user');
+          }
+        },
+        onBotTranscript: (data) => {
+          if (data && data.text) {
+            addTranscript(data.text, 'bot');
+          }
+        },
+        onTrackStarted: (track, participant) => {
+          if (!participant || !participant.local && track.kind === 'audio') {
+            setupBotAudio(track);
+          }
+        },
+        onError: (error) => {
+          log('Error: ' + (error.message || JSON.stringify(error)), 'error');
+          if (currentStatus === 'connecting' || currentStatus === 'connected') {
+            setStatus('error');
+          }
+        },
+        onMessageError: (error) => {
+          log('Message error: ' + (error.message || JSON.stringify(error)), 'error');
+        }
+      }
+    });
+
+    log('Initializing devices...', 'event');
+    await pcClient.initDevices();
+    log('Devices initialized, connecting to bot...', 'event');
+
+    await pcClient.startBotAndConnect({
+      endpoint: CONNECT_URL
+    });
+
+    log('Connection complete', 'event');
+  } catch (e) {
+    log('Connection failed: ' + e.message, 'error');
+    setStatus('error');
+    if (pcClient) {
+      try { await pcClient.disconnect(); } catch (ex) { /* ignore */ }
+      pcClient = null;
+    }
+  }
+}
+
+async function disconnectBot() {
+  if (pcClient) {
+    try {
+      await pcClient.disconnect();
+    } catch (e) {
+      log('Disconnect error: ' + e.message, 'error');
+    }
+    pcClient = null;
+  }
+  if (botAudio.srcObject) {
+    const tracks = botAudio.srcObject.getTracks();
+    for (let i = 0; i < tracks.length; i++) {
+      tracks[i].stop();
+    }
+    botAudio.srcObject = null;
+  }
+  setStatus('disconnected');
+  log('Disconnected', 'event');
+}
+
+// ============================================================================
+//  SECTION 6: Connect/Disconnect Toggle
+// ============================================================================
+
+async function toggleConnection() {
+  if (currentStatus === 'disconnected' || currentStatus === 'error') {
+    await connectBot();
+  } else if (currentStatus === 'connected') {
+    await disconnectBot();
+  }
+}
+
+// ============================================================================
+//  SECTION 7: Chat Text Input
+// ============================================================================
+
+const chatInput = document.getElementById('chatInput');
+const chatSendBtn = document.getElementById('chatSendBtn');
+const chatBar = document.getElementById('chatBar');
+
+chatSendBtn.addEventListener('click', sendChatText);
+chatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') sendChatText();
+});
+
+async function sendChatText() {
+  const text = chatInput.value.trim();
+  if (!text || !pcClient) return;
+  chatInput.value = '';
+  try {
+    await pcClient.sendText(text);
+    log('📤 Sent text: ' + text, 'send');
+    addTranscript(text, 'user');
+  } catch (e) {
+    log('❌ Send text failed: ' + e.message, 'error');
+  }
+}
+
+// Show chat bar when connected
+const origSetStatus = setStatus;
+setStatus = function(status) {
+  origSetStatus(status);
+  chatBar.style.display = (status === 'connected') ? 'block' : 'none';
+};
+
+// ============================================================================
+//  SECTION 8: Initialize
+// ============================================================================
+
+function init() {
+  transcriptEmpty = transcriptBody.querySelector('.transcript-empty');
+  log('Pipecat AI Client initialized (SDK mode)', 'event');
+  log('Browser: ' + navigator.userAgent, 'event');
+  setStatus('disconnected');
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}
+</script>
+</body>
+</html>

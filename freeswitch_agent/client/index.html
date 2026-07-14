@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FreeSWITCH Voice Agent - Test</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .container {
+            background: #1e293b;
+            border-radius: 24px;
+            padding: 48px;
+            width: 480px;
+            max-width: 92vw;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.5);
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 1.35rem;
+            margin-bottom: 4px;
+            color: #f8fafc;
+        }
+
+        .subtitle {
+            color: #94a3b8;
+            margin-bottom: 24px;
+            font-size: 0.85rem;
+        }
+
+        .badge {
+            display: inline-block;
+            background: #1e40af;
+            color: #93c5fd;
+            font-size: 0.7rem;
+            padding: 2px 10px;
+            border-radius: 20px;
+            margin-top: 4px;
+        }
+
+        .status-indicator {
+            width: 100px;
+            height: 100px;
+            margin: 0 auto 20px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #334155, #475569);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 40px;
+            transition: all 0.3s ease;
+            box-shadow: 0 0 20px rgba(0,0,0,0.3);
+        }
+        .status-indicator.connected {
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            animation: pulse 2s ease-in-out infinite;
+        }
+        .status-indicator.speaking {
+            background: linear-gradient(135deg, #22c55e, #16a34a);
+            animation: pulse 0.8s ease-in-out infinite;
+        }
+        .status-indicator.error {
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); box-shadow: 0 0 20px rgba(59,130,246,0.3); }
+            50% { transform: scale(1.06); box-shadow: 0 0 40px rgba(59,130,246,0.5); }
+        }
+
+        .status-text {
+            margin-bottom: 20px;
+            font-size: 0.9rem;
+            min-height: 1.5em;
+        }
+        .status-text.connected { color: #22c55e; font-weight: 600; }
+        .status-text.error { color: #ef4444; }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 32px;
+            border: none;
+            border-radius: 50px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: #3b82f6;
+            color: white;
+            width: 100%;
+            justify-content: center;
+        }
+        .btn:hover { background: #2563eb; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+        .btn.danger { background: #ef4444; }
+        .btn.danger:hover { background: #dc2626; }
+
+        .controls {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+        }
+        .controls .btn { font-size: 0.8rem; padding: 10px 16px; }
+        .controls .btn-secondary {
+            background: #475569;
+        }
+        .controls .btn-secondary:hover { background: #64748b; }
+
+        .vumeter {
+            margin-top: 16px;
+            height: 6px;
+            background: #334155;
+            border-radius: 3px;
+            overflow: hidden;
+            opacity: 0.3;
+            transition: opacity 0.3s;
+        }
+        .vumeter.active { opacity: 1; }
+        .vumeter .bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+            border-radius: 3px;
+            transition: width 0.05s;
+        }
+
+        .log {
+            margin-top: 20px;
+            max-height: 180px;
+            overflow-y: auto;
+            text-align: left;
+            background: #0f172a;
+            border-radius: 12px;
+            padding: 14px;
+            font-size: 0.8rem;
+            line-height: 1.6;
+        }
+        .log::-webkit-scrollbar { width: 4px; }
+        .log::-webkit-scrollbar-thumb { background: #475569; border-radius: 2px; }
+
+        .log .info { color: #94a3b8; font-style: italic; }
+        .log .sent { color: #60a5fa; }
+        .log .received { color: #4ade80; }
+        .log .error { color: #ef4444; }
+        .log .transcript { color: #fbbf24; }
+        .log .event { color: #a78bfa; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="status-indicator" id="indicator">📞</div>
+        <h1>FreeSWITCH Voice Agent</h1>
+        <p class="subtitle">WebSocket Test Client · L16 PCM @ 8kHz</p>
+        <div class="badge">ws://localhost:8086/audio-stream</div>
+
+        <div class="vumeter" id="vumeter">
+            <div class="bar" id="vumbar"></div>
+        </div>
+
+        <div class="status-text" id="status">🔴 Chưa kết nối</div>
+
+        <button class="btn" id="connectBtn">
+            🔌 Kết nối
+        </button>
+
+        <div class="controls" id="controls" style="display:none;">
+            <button class="btn btn-secondary" id="muteBtn" style="flex:1;">🔊 Mute mic</button>
+            <button class="btn btn-secondary" id="echoBtn" style="flex:1;">🔁 Echo test</button>
+        </div>
+
+        <div class="log" id="log"></div>
+    </div>
+
+    <script>
+        // ===================================================================
+        // DOM refs
+        // ===================================================================
+        const $ = (id) => document.getElementById(id);
+        const indicator = $('indicator');
+        const statusEl = $('status');
+        const btn = $('connectBtn');
+        const log = $('log');
+        const vumeter = $('vumeter');
+        const vumbar = $('vumbar');
+        const controls = $('controls');
+
+        // ===================================================================
+        // State
+        // ===================================================================
+        const WS_URL = `ws://${location.host}/audio-stream`;
+        const TARGET_RATE = 8000;
+
+        let ws = null;
+        let audioCtx = null;
+        let micStream = null;
+        let processor = null;
+        let mediaSource = null;
+        let connected = false;
+        let muted = false;
+        let playbackQueue = [];
+        let isPlaying = false;
+        let vuInterval = null;
+
+        // ===================================================================
+        // Logging
+        // ===================================================================
+        function addLog(cls, msg) {
+            const d = document.createElement('div');
+            d.className = cls;
+            d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            log.appendChild(d);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function setStatus(text, cls = '') {
+            statusEl.textContent = text;
+            statusEl.className = 'status-text' + (cls ? ' ' + cls : '');
+        }
+
+        function setIndicator(state) {
+            indicator.className = 'status-indicator' + (state ? ' ' + state : '');
+        }
+
+        // ===================================================================
+        // Audio capture: downsample Float32Array to target rate
+        // ===================================================================
+        function downsample(audio, srcRate, dstRate) {
+            if (srcRate === dstRate) return audio;
+            const ratio = srcRate / dstRate;
+            const dstLen = Math.round(audio.length / ratio);
+            const result = new Float32Array(dstLen);
+            for (let i = 0; i < dstLen; i++) {
+                const srcIdx = i * ratio;
+                const left = Math.floor(srcIdx);
+                const right = Math.min(left + 1, audio.length - 1);
+                const frac = srcIdx - left;
+                result[i] = audio[left] * (1 - frac) + audio[right] * frac;
+            }
+            return result;
+        }
+
+        function float32ToPcm16(float32) {
+            const pcm = new Int16Array(float32.length);
+            for (let i = 0; i < float32.length; i++) {
+                const s = Math.max(-1, Math.min(1, float32[i]));
+                pcm[i] = Math.round(s * 32767);
+            }
+            return pcm;
+        }
+
+        // ===================================================================
+        // Audio playback: gapless streaming using scheduled BufferSource nodes
+        // ===================================================================
+        let nextPlayTime = 0;
+        let playbackScheduled = false;
+
+        function enqueuePcm(pcmBytes) {
+            const samples = new Int16Array(pcmBytes);
+            const float32 = new Float32Array(samples.length);
+            for (let i = 0; i < samples.length; i++) {
+                float32[i] = samples[i] / 32768;
+            }
+            playbackQueue.push(float32);
+            if (!playbackScheduled) schedulePlayback();
+        }
+
+        function schedulePlayback() {
+            if (!audioCtx || playbackQueue.length === 0) {
+                playbackScheduled = false;
+                return;
+            }
+            playbackScheduled = true;
+
+            // Đồng bộ nextPlayTime với currentTime khi bắt đầu
+            if (nextPlayTime < audioCtx.currentTime) {
+                nextPlayTime = audioCtx.currentTime;
+            }
+
+            // Lên lịch tối đa 10 chunk cùng lúc
+            const batch = playbackQueue.splice(0, 10);
+            for (const chunk of batch) {
+                const buffer = audioCtx.createBuffer(1, chunk.length, TARGET_RATE);
+                buffer.getChannelData(0).set(chunk);
+
+                const source = audioCtx.createBufferSource();
+                source.buffer = buffer;
+                source.connect(audioCtx.destination);
+                source.start(nextPlayTime);
+                nextPlayTime += buffer.duration;
+            }
+
+            // Lên lịch batch tiếp theo
+            setTimeout(() => schedulePlayback(), 50);
+        }
+
+        // ===================================================================
+        // Microphone setup
+        // ===================================================================
+        async function setupMicrophone() {
+            audioCtx = new AudioContext();
+            if (audioCtx.state === 'suspended') {
+                await audioCtx.resume();
+            }
+
+            micStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                },
+            });
+
+            mediaSource = audioCtx.createMediaStreamSource(micStream);
+            const bufSize = 4096;
+            processor = audioCtx.createScriptProcessor(bufSize, 1, 1);
+
+            // Ghi đè sampleRate mặc định của context để tránh resample phía trình duyệt
+            const srcRate = audioCtx.sampleRate;
+
+            processor.onaudioprocess = (e) => {
+                if (!connected || muted) return;
+                const input = e.inputBuffer.getChannelData(0);
+
+                // AGC đơn giản: tính peak level, boost tự động
+                let peak = 0;
+                for (let i = 0; i < input.length; i++) {
+                    const abs = Math.abs(input[i]);
+                    if (abs > peak) peak = abs;
+                }
+                // Gain tự động: nếu audio nhỏ, boost nhiều hơn
+                const targetLevel = 0.3; // target peak level
+                const gain = peak > 0.001 ? Math.min(30, targetLevel / peak) : 10;
+                const boosted = new Float32Array(input.length);
+                for (let i = 0; i < input.length; i++) {
+                    boosted[i] = Math.max(-1, Math.min(1, input[i] * gain));
+                }
+
+                // Downsample từ sampleRate của mic (thường 48kHz hoặc 44.1kHz) xuống 8kHz
+                const down = downsample(boosted, srcRate, TARGET_RATE);
+
+                // Chuyển Float32Array sang Int16Array để gửi raw PCM
+                const pcm = float32ToPcm16(down);
+
+                try {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(pcm.buffer);
+                    }
+                } catch (err) {
+                    // ignore
+                }
+            };
+
+            // ScriptProcessorNode PHẢI được connect vào audio graph để fire callback.
+            // Connect trực tiếp ra destination (volume thấp) — echo cancellation
+            // trên browser sẽ loại bỏ feedback.
+            mediaSource.connect(processor);
+            processor.connect(audioCtx.destination);
+            addLog('info', `🎤 Mic @ ${srcRate}Hz → ${TARGET_RATE}Hz`);
+
+            // Volume meter — dùng ScriptProcessorNode cho chính xác
+            const vuData = new Uint8Array(128);
+
+            const vuAnalyser = audioCtx.createAnalyser();
+            vuAnalyser.fftSize = 256;
+            mediaSource.connect(vuAnalyser);
+
+            vuInterval = setInterval(() => {
+                if (!connected) return;
+                vuAnalyser.getByteFrequencyData(vuData);
+                const sum = vuData.reduce((a, b) => a + b, 0);
+                const avg = sum / vuData.length;
+                const pct = Math.min(100, avg * 3);
+                vumbar.style.width = pct + '%';
+                vumeter.classList.toggle('active', pct > 3);
+            }, 80);
+        }
+
+        // ===================================================================
+        // WebSocket connection
+        // ===================================================================
+        async function connect() {
+            try {
+                setStatus('🔄 Đang kết nối...');
+                setIndicator('connected');
+                btn.disabled = true;
+                btn.textContent = '⏳ Đang kết nối...';
+
+                // Setup audio first
+                await setupMicrophone();
+
+                // Connect WebSocket
+                ws = new WebSocket(WS_URL);
+                ws.binaryType = 'arraybuffer';
+
+                ws.onopen = () => {
+                    connected = true;
+                    setStatus('✅ Đã kết nối! Đang nói...', 'connected');
+                    btn.textContent = '🔌 Ngắt kết nối';
+                    btn.className = 'btn danger';
+                    btn.disabled = false;
+                    controls.style.display = 'flex';
+                    addLog('info', `✅ WebSocket connected to ${WS_URL}`);
+                    setIndicator('connected');
+                };
+
+                ws.onmessage = (evt) => {
+                    if (evt.data instanceof ArrayBuffer) {
+                        // Raw PCM audio từ server
+                        enqueuePcm(evt.data);
+                        addLog('received', `🔊 Audio ${evt.data.byteLength} bytes`);
+                        setIndicator('speaking');
+                        setTimeout(() => {
+                            if (connected) setIndicator('connected');
+                        }, 500);
+                    } else if (typeof evt.data === 'string') {
+                        // Text message
+                        try {
+                            const msg = JSON.parse(evt.data);
+                            if (msg.type === 'transcript') {
+                                addLog('transcript', `🗣️ ${msg.text || msg.transcript}`);
+                            } else if (msg.type === 'bot-started-speaking') {
+                                setIndicator('speaking');
+                            } else if (msg.type === 'bot-stopped-speaking') {
+                                setIndicator('connected');
+                            }
+                        } catch {
+                            addLog('info', `📨 ${evt.data}`);
+                        }
+                    }
+                };
+
+                ws.onerror = (err) => {
+                    addLog('error', `❌ WebSocket error`);
+                };
+
+                ws.onclose = (evt) => {
+                    addLog('info', `🔌 WebSocket closed (code=${evt.code})`);
+                    disconnect();
+                };
+
+            } catch (err) {
+                addLog('error', `❌ ${err.message}`);
+                setStatus(`❌ ${err.message}`, 'error');
+                setIndicator('error');
+                cleanupAudio();
+                btn.textContent = '🔄 Thử lại';
+                btn.className = 'btn';
+                btn.disabled = false;
+            }
+        }
+
+        // ===================================================================
+        // Disconnect
+        // ===================================================================
+        function disconnect() {
+            connected = false;
+            muted = false;
+
+            if (ws) {
+                try { ws.close(); } catch {}
+                ws = null;
+            }
+
+            cleanupAudio();
+
+            playbackQueue = [];
+            isPlaying = false;
+
+            btn.textContent = '🔌 Kết nối lại';
+            btn.className = 'btn';
+            btn.disabled = false;
+            controls.style.display = 'none';
+            vumeter.classList.remove('active');
+            vumbar.style.width = '0%';
+
+            setStatus('🔴 Đã ngắt kết nối');
+            setIndicator('');
+        }
+
+        function cleanupAudio() {
+            if (vuInterval) { clearInterval(vuInterval); vuInterval = null; }
+            if (processor) {
+                try { processor.disconnect(); } catch {}
+                processor = null;
+            }
+            if (mediaSource) {
+                try { mediaSource.disconnect(); } catch {}
+                mediaSource = null;
+            }
+            if (micStream) {
+                micStream.getTracks().forEach(t => t.stop());
+                micStream = null;
+            }
+            if (audioCtx) {
+                try { audioCtx.close(); } catch {}
+                audioCtx = null;
+            }
+        }
+
+        // ===================================================================
+        // Button handlers
+        // ===================================================================
+        btn.addEventListener('click', () => {
+            if (connected || (ws && ws.readyState === WebSocket.OPEN)) {
+                disconnect();
+            } else {
+                connect();
+            }
+        });
+
+        $('muteBtn').addEventListener('click', () => {
+            muted = !muted;
+            $('muteBtn').textContent = muted ? '🔇 Đang mute' : '🔊 Mute mic';
+            addLog('info', muted ? '🔇 Mic đã tắt' : '🔊 Mic đã bật');
+        });
+
+        $('echoBtn').addEventListener('click', () => {
+            addLog('event', '🔁 Gửi echo test...');
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                // Gửi text message để test
+                ws.send(JSON.stringify({ type: 'ping' }));
+                // Cũng gửi một chuỗi PCM im lặng ngắn
+                const silent = new Int16Array(1600); // 200ms @ 8kHz
+                ws.send(silent.buffer);
+                addLog('sent', '📤 Sent ping + silence');
+            }
+        });
+
+        addLog('info', `🌐 WebSocket endpoint: ${WS_URL}`);
+        addLog('info', '👆 Nhấn "Kết nối" để bắt đầu');
+        addLog('info', '🎤 Nói vào mic → gửi raw PCM → nhận response');
+    </script>
+</body>
+</html>
