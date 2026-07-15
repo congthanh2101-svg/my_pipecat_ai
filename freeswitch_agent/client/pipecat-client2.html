@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pipecat AI Client v2</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:#0f0f1a; color:#e0e0e0; min-height:100vh; display:flex; flex-direction:column; }
+.header { background:linear-gradient(135deg,#1a1a4e,#2d1b69,#1a3a5c); padding:16px 24px; display:flex; align-items:center; gap:14px; border-bottom:1px solid rgba(255,255,255,0.08); flex-shrink:0; }
+.header h1 { font-size:1.2rem; font-weight:600; background:linear-gradient(90deg,#c4b5fd,#a5b4fc); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+.status-bar { display:flex; align-items:center; gap:12px; padding:10px 24px; background:#14142b; border-bottom:1px solid rgba(255,255,255,0.05); flex-shrink:0; flex-wrap:wrap; }
+.dot { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
+.dot.off { background:#6b7280; }
+.dot.on { background:#22c55e; box-shadow:0 0 10px #22c55e88; }
+.dot.speak { background:#f59e0b; box-shadow:0 0 10px #f59e0b88; animation:pulse .8s infinite; }
+.dot.err { background:#ef4444; box-shadow:0 0 10px #ef444488; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+.main { flex:1; display:flex; flex-direction:column; padding:16px 24px; overflow-y:auto; }
+#log { flex:1; overflow-y:auto; padding:12px; background:#0a0a15; border-radius:12px; font-size:.85rem; line-height:1.6; margin-bottom:12px; min-height:200px; }
+#log div { padding:2px 0; }
+#log .s { color:#4ade80; } #log .r { color:#60a5fa; } #log .e { color:#ef4444; } #log .i { color:#94a3b8; font-style:italic; }
+.chat-bar { display:flex; gap:8px; flex-shrink:0; padding:8px 0; }
+.chat-bar input { flex:1; padding:10px 16px; border-radius:50px; border:1px solid #2d2d4a; background:#1a1a30; color:#e0e0e0; font-size:.9rem; outline:none; }
+.chat-bar input:focus { border-color:#6366f1; }
+.chat-bar button { padding:10px 24px; border:none; border-radius:50px; background:linear-gradient(135deg,#6366f1,#8b5cf6); color:#fff; font-weight:600; cursor:pointer; font-size:.9rem; }
+.chat-bar button:disabled { opacity:.5; cursor:default; }
+.btn-connect { display:block; margin:0 auto; padding:12px 32px; border:none; border-radius:50px; background:linear-gradient(135deg,#22c55e,#16a34a); color:#fff; font-weight:600; cursor:pointer; font-size:1rem; flex-shrink:0; }
+.btn-conn.off { background:linear-gradient(135deg,#6366f1,#8b5cf6); }
+.btn-conn.dc { background:linear-gradient(135deg,#ef4444,#dc2626); }
+.center { display:flex; justify-content:center; align-items:center; gap:12px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div style="width:36px;height:36px;border-radius:8px;background:linear-gradient(135deg,#6366f1,#8b5cf6);display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;flex-shrink:0;">P</div>
+  <h1>Pipecat AI Client v2</h1>
+</div>
+
+<div class="status-bar" id="statusBar">
+  <div class="dot off" id="statusDot"></div>
+  <span id="statusText">Disconnected</span>
+  <span id="speakIndicator" style="display:none;color:#f59e0b;">🎤 Speaking...</span>
+  <span id="botIndicator" style="display:none;color:#22c55e;">🔊 Bot speaking...</span>
+</div>
+
+<div class="main">
+  <div id="log"></div>
+  <div class="chat-bar" id="chatBar" style="display:none;">
+    <input type="text" id="chatInput" placeholder="Nhập tin nhắn text..." disabled>
+    <button id="chatBtn" disabled>Send</button>
+  </div>
+  <div class="center">
+    <button class="btn-conn" id="connectBtn">🔌 Connect</button>
+  </div>
+</div>
+
+<script>
+// ===== State =====
+const WS_URL = (location.protocol === 'https:' ? 'wss:' : 'ws:') + `//${location.host}/audio-stream`;
+const TARGET_RATE = 8000;
+
+let ws = null;
+let audioCtx = null;
+let processor = null;
+let mediaSource = null;
+let micStream = null;
+let connected = false;
+let muted = false;
+let nextPlayTime = 0;
+let playbackQueue = [];
+
+const $ = id => document.getElementById(id);
+const dot = $('statusDot');
+const statTxt = $('statusText');
+const logEl = $('log');
+const btn = $('connectBtn');
+const chatBar = $('chatBar');
+const chatInput = $('chatInput');
+const chatBtn = $('chatBtn');
+const speakInd = $('speakIndicator');
+const botInd = $('botIndicator');
+
+function log(cls, msg) {
+  const d = document.createElement('div');
+  d.className = cls;
+  d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(text, state) {
+  statTxt.textContent = text;
+  dot.className = 'dot ' + state;
+}
+
+// ===== Audio capture =====
+function downsample(audio, srcRate, dstRate) {
+  if (srcRate === dstRate) return audio;
+  const ratio = srcRate / dstRate;
+  const dstLen = Math.round(audio.length / ratio);
+  const result = new Float32Array(dstLen);
+  for (let i = 0; i < dstLen; i++) {
+    const idx = i * ratio;
+    const left = Math.floor(idx);
+    const right = Math.min(left + 1, audio.length - 1);
+    const frac = idx - left;
+    result[i] = audio[left] * (1 - frac) + audio[right] * frac;
+  }
+  return result;
+}
+
+function f32To16(f32) {
+  const i16 = new Int16Array(f32.length);
+  for (let i = 0; i < f32.length; i++)
+    i16[i] = Math.round(Math.max(-1, Math.min(1, f32[i])) * 32767);
+  return i16;
+}
+
+// ===== Playback =====
+function enqueuePcm(bytes) {
+  const samples = new Int16Array(bytes);
+  const f32 = new Float32Array(samples.length);
+  for (let i = 0; i < samples.length; i++) f32[i] = samples[i] / 32768;
+  playbackQueue.push(f32);
+  if (playbackQueue.length === 1) schedulePlayback();
+}
+
+function schedulePlayback() {
+  if (!audioCtx || playbackQueue.length === 0) return;
+  if (nextPlayTime < audioCtx.currentTime) nextPlayTime = audioCtx.currentTime;
+  const batch = playbackQueue.splice(0, 10);
+  for (const chunk of batch) {
+    const buf = audioCtx.createBuffer(1, chunk.length, TARGET_RATE);
+    buf.getChannelData(0).set(chunk);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(audioCtx.destination);
+    src.start(nextPlayTime);
+    nextPlayTime += buf.duration;
+  }
+  setTimeout(schedulePlayback, 50);
+}
+
+// ===== Connection =====
+async function connect() {
+  try {
+    btn.disabled = true;
+    btn.textContent = '⏳ Connecting...';
+    setStatus('Connecting...', 'off');
+    log('i', 'Starting...');
+    log('i', `WS URL: ${location.host}`);
+
+    // Setup audio
+    audioCtx = new AudioContext();
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    mediaSource = audioCtx.createMediaStreamSource(micStream);
+    const bufSize = 4096;
+    const srcRate = audioCtx.sampleRate;
+    processor = audioCtx.createScriptProcessor(bufSize, 1, 1);
+
+    processor.onaudioprocess = (e) => {
+      if (!connected) return;
+      const input = e.inputBuffer.getChannelData(0);
+      let peak = 0;
+      for (let i = 0; i < input.length; i++) { const a = Math.abs(input[i]); if (a > peak) peak = a; }
+      const gain = peak > 0.001 ? Math.min(100, 0.5 / peak) : 10;
+      const boosted = new Float32Array(input.length);
+      for (let i = 0; i < input.length; i++) boosted[i] = Math.max(-1, Math.min(1, input[i] * gain));
+      const down = downsample(boosted, srcRate, TARGET_RATE);
+      const pcm = f32To16(down);
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(pcm.buffer);
+    };
+    mediaSource.connect(processor);
+    processor.connect(audioCtx.destination);
+    log('i', `🎤 Mic @ ${srcRate}Hz → ${TARGET_RATE}Hz`);
+
+    // WebSocket
+    log('i', `Connecting to ${WS_URL}...`);
+    ws = new WebSocket(WS_URL);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => {
+      connected = true;
+      setStatus('Connected', 'on');
+      btn.textContent = '🔌 Disconnect';
+      btn.className = 'btn-conn dc';
+      btn.disabled = false;
+      chatBar.style.display = 'flex';
+      chatInput.disabled = false;
+      chatBtn.disabled = false;
+      log('s', '✅ Connected to ' + WS_URL);
+    };
+
+    ws.onmessage = (evt) => {
+      if (evt.data instanceof ArrayBuffer) {
+        enqueuePcm(evt.data);
+      } else if (typeof evt.data === 'string') {
+        try {
+          const msg = JSON.parse(evt.data);
+          if (msg.type === 'bot-started-speaking') botInd.style.display = 'inline';
+          if (msg.type === 'bot-stopped-speaking') botInd.style.display = 'none';
+          if (msg.type === 'user-started-speaking') speakInd.style.display = 'inline';
+          if (msg.type === 'user-stopped-speaking') speakInd.style.display = 'none';
+        } catch {}
+      }
+    };
+
+    ws.onclose = (evt) => {
+      log('i', `🔌 Closed (code=${evt.code})`);
+      disconnect();
+    };
+
+    ws.onerror = (e) => log('e', `❌ WebSocket error: ${e.type}`);
+
+  } catch (err) {
+    log('e', `❌ ${err.message}`);
+    setStatus('Error', 'err');
+    cleanup();
+    btn.textContent = '🔄 Retry';
+    btn.className = 'btn-conn';
+    btn.disabled = false;
+  }
+}
+
+function disconnect() {
+  connected = false;
+  if (ws) { try { ws.close(); } catch {} ws = null; }
+  cleanup();
+  playbackQueue = [];
+  btn.textContent = '🔌 Connect';
+  btn.className = 'btn-conn';
+  btn.disabled = false;
+  chatBar.style.display = 'none';
+  setStatus('Disconnected', 'off');
+  log('i', '🔌 Disconnected');
+}
+
+function cleanup() {
+  if (processor) { try { processor.disconnect(); } catch {} processor = null; }
+  if (mediaSource) { try { mediaSource.disconnect(); } catch {} mediaSource = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (audioCtx) { try { audioCtx.close(); } catch {} audioCtx = null; }
+}
+
+// ===== Chat =====
+async function sendText() {
+  const text = chatInput.value.trim();
+  if (!text) return;
+  chatInput.value = '';
+  try {
+    await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+    log('s', `📤 ${text}`);
+  } catch (e) {
+    log('e', `📤 Error: ${e.message}`);
+  }
+}
+
+chatBtn.addEventListener('click', sendText);
+chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendText(); });
+btn.addEventListener('click', () => {
+  if (connected) disconnect();
+  else connect();
+});
+
+log('i', `🌐 ${WS_URL}`);
+log('i', '👆 Press Connect to start');
+</script>
+</body>
+</html>

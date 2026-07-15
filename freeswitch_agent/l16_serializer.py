@@ -100,18 +100,18 @@ class L16FrameSerializer(FrameSerializer):
         return audio
 
     async def deserialize(self, data: bytes | str) -> Frame | None:
-        """Deserialize raw PCM bytes → InputAudioRawFrame.
-
-        Args:
-            data: Raw PCM bytes từ WebSocket.
-
-        Returns:
-            InputAudioRawFrame nếu data là bytes, None otherwise.
-        """
+        """Deserialize raw PCM bytes → InputAudioRawFrame."""
         if isinstance(data, bytes):
-            return InputAudioRawFrame(
+            import numpy as np
+            samples = np.frombuffer(data, dtype=np.int16)
+            rms = float(np.sqrt(np.mean(samples.astype(float)**2))) if len(samples) > 0 else 0
+            if rms > 5000:  # Only log when there's actual speech-level audio
+                import logging
+                logging.getLogger().info(f"📥 L16 audio: {len(data)}b rms={rms:.0f}")
+            frame = InputAudioRawFrame(
                 audio=data,
                 sample_rate=self._sample_rate,
                 num_channels=self._num_channels,
             )
+            return frame
         return None

@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pipecat AI Client</title>
+  <script type="module" crossorigin src="/react-c1/assets/index-rIARzXse.js"></script>
+  <link rel="stylesheet" crossorigin href="/react-c1/assets/index-BCv1OZq-.css">
+</head>
+<body>
+  <div class="app-container">
+    <header class="app-header">
+      <h1>Pipecat AI Client</h1>
+      <div class="subtitle">Real-time voice AI via WebSocket (RTVI protocol)</div>
+    </header>
+
+    <div class="main-grid">
+      <!-- Left column -->
+      <div>
+        <div class="card">
+          <div class="card-title">Connection</div>
+          <div class="form-group">
+            <label for="phone-input">Phone Number</label>
+            <input type="text" id="phone-input" placeholder="Enter phone number" autocomplete="off" />
+          </div>
+          <div class="form-group">
+            <label for="conversation-id">Conversation ID</label>
+            <div style="display: flex; gap: 8px;">
+              <input type="text" id="conversation-id" readonly style="flex: 1;" />
+              <button id="btn-new-conv" class="btn btn-clear">New</button>
+            </div>
+          </div>
+          <button id="btn-connect" class="btn btn-connect">Connect</button>
+          <div class="status-row">
+            <span id="status-indicator" class="status-dot status-red"></span>
+            <span id="status-text" class="status-text">Disconnected</span>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top: 20px;">
+          <div class="card-title" style="display: flex; justify-content: space-between; align-items: center;">
+            <span>Conversation</span>
+            <button id="btn-clear-conversation" class="btn btn-clear">Clear</button>
+          </div>
+          <div id="transcript" class="transcript-container">
+            <div style="color: #4a5568; text-align: center; padding: 12px 0;">
+              Connect to start a conversation
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right column -->
+      <div>
+        <div class="card">
+          <div class="card-title" style="display: flex; justify-content: space-between; align-items: center;">
+            <span>Debug Log</span>
+            <button id="btn-clear" class="btn btn-clear">Clear</button>
+          </div>
+          <div id="debug-log" class="debug-container"></div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="app-footer">
+      Pipecat Client Web &mdash; Approach C1 (Vite + Vanilla TypeScript)
+    </footer>
+  </div>
+
+  <!-- Chat bar -->
+  <div id="chat-bar" style="position:fixed;bottom:0;left:0;right:0;background:#1a1a2e;border-top:1px solid #2d2d4a;padding:8px 12px;display:none;align-items:center;gap:8px;z-index:1000;">
+    <input id="chat-input" type="text" placeholder="Nhập tin nhắn text..." style="flex:1;padding:8px 12px;border-radius:8px;border:1px solid #2d2d4a;background:#0f0f1a;color:#e0e0e0;font-size:14px;outline:none;">
+    <button id="chat-send" style="padding:8px 20px;border:none;border-radius:8px;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;font-weight:600;cursor:pointer;font-size:14px;">Send</button>
+  </div>
+
+  <script>
+  // Chat functionality
+  const chatBar = document.getElementById('chat-bar');
+  const chatInput = document.getElementById('chat-input');
+  const chatSend = document.getElementById('chat-send');
+
+  // Show chat bar when connected
+  const observer = new MutationObserver(() => {
+    const statusText = document.getElementById('status-text');
+    chatBar.style.display = statusText && statusText.textContent === 'Connected' ? 'flex' : 'none';
+  });
+  const statusTarget = document.getElementById('status-text');
+  if (statusTarget) observer.observe(statusTarget, { childList: true, characterData: true, subtree: true });
+
+  async function sendChat() {
+    const text = chatInput.value.trim();
+    if (!text) return;
+    chatInput.value = '';
+    try {
+      await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+    } catch (e) {
+      console.error('Chat error:', e);
+    }
+  }
+
+  chatSend.addEventListener('click', sendChat);
+  chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
+  </script>
+</body>
+</html>
