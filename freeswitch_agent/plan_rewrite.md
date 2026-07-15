@@ -46,3 +46,26 @@ transport_params → FastAPIWebsocketTransport → Pipeline
 - SileroVADAnalyzer mặc định 16000Hz
 - WebSocket transport ở 8000Hz
 - Cần test: pass `sample_rate=8000` hoặc để auto-detect
+
+---
+
+## Bổ sung sau rewrite (2026-07-15)
+
+### 6. Fix Piper native sample rate (22050Hz)
+- **Vấn đề:** `SOXRStreamAudioResampler.resample_chunk()` không gọi `last=True` ở chunk cuối → mất ~5-15ms âm cuối
+- **Fix:** Set `PiperTTSService(sample_rate=22050)` khớp native rate, bỏ qua SoX resampling
+- **Hậu quả:** L16 serializer resample từng chunk riêng lẻ bằng scipy FFT → boundary artifacts → âm rè
+
+### 7. Endpoint `/transcribe-audio` (test STT/LLM/TTS độc lập)
+- `POST /transcribe-audio` — upload WAV → Whisper STT → Ollama LLM → Piper TTS → JSON
+- Dùng faster-whisper model cached singleton
+- Dùng OpenAI client gọi Ollama API
+- Dùng Piper voice cached singleton
+- Không phụ thuộc WebSocket/VAD/Pipeline
+- **Kết quả:** Whisper, Ollama, Piper đều hoạt động tốt. Vấn đề STT không hoạt động là do WebSocket pipeline (sample rate mismatch, VAD)
+
+### 8. Trang `/upload-test`
+- Giao diện web cho `/transcribe-audio`
+- Hỗ trợ kéo thả file WAV + ghi âm trực tiếp từ browser
+- Hiển thị transcription, response text, audio player
+- Đã xác nhận STT/LLM/TTS hoạt động đúng

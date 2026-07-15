@@ -87,3 +87,46 @@ Browser mic (48000Hz Float32)
 - react-c1 cho chọn 8000/16000/22050/44100 Hz cho audio input
 - Ở 22050Hz hoặc 44100Hz: âm thanh nghe tốt hơn vì không qua resample
 - Ở 8000Hz: âm thanh bị rè do resample từ 48000 → 8000 ở client-side
+
+---
+
+## 4. Kết quả test với `/upload-test` (2026-07-15)
+
+**Confirmed:** STT, LLM, TTS đều hoạt động hoàn hảo khi test độc lập qua REST.
+
+- Whisper medium transcription tiếng Việt: **chính xác**
+- Ollama response: **đúng ngữ cảnh**
+- Piper TTS audio: **rõ ràng, không rè**
+- Thời gian xử lý: ~0.5s STT + ~0.3s LLM + ~0.7s TTS
+
+**Kết luận:** Vấn đề không phải do Whisper/Ollama/Piper. Nguyên nhân STT không hoạt động trong WebSocket pipeline là do:
+
+1. **Sample rate mismatch giữa browser mic (48000Hz) và transport (8000Hz)** — serializer không resample
+2. **SileroVADAnalyzer ở 8000Hz không detect được speech từ audio 48000Hz bị mislabel**
+3. **Thiếu resampling trong RTVICompatibleSerializer.deserialize() và L16FrameSerializer.deserialize()**
+
+## 5. Endpoint `/transcribe-audio`
+
+`POST /transcribe-audio` — Upload file WAV, nhận JSON:
+```json
+{
+  "success": true,
+  "transcription": "...",
+  "response_text": "...",
+  "audio_base64": "...",
+  "processing_time_s": 1.5,
+  "timing": { "stt_s": 0.5, "llm_s": 0.3, "tts_s": 0.7 }
+}
+```
+
+- Dùng faster-whisper model trực tiếp (singleton)
+- Dùng OpenAI client gọi Ollama API
+- Dùng Piper voice trực tiếp (singleton)
+- Không phụ thuộc Pipecat pipeline, VAD, WebSocket
+
+## 6. Trang `/upload-test`
+
+Giao diện web cho `/transcribe-audio` tại `http://localhost:8086/upload-test`.
+- Kéo thả file WAV hoặc chọn file
+- Ghi âm trực tiếp từ browser (chuyển sang WAV 16000Hz)
+- Hiển thị kết quả: transcription, response text, audio player

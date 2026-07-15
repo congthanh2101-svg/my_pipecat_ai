@@ -20,15 +20,20 @@ Endpoints:
 """
 
 import asyncio
+import io
 import os
+import time
+import wave
 from pathlib import Path
 
+import base64
 import numpy as np
 from dotenv import load_dotenv
 from loguru import logger
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from openai import OpenAI
 from pydantic import BaseModel
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
@@ -469,6 +474,12 @@ async def pipecat_client_ui():
     return HTMLResponse(path.read_text(encoding="utf-8")) if path.exists() else HTMLResponse("Not found", 404)
 
 
+@app.get("/upload-test")
+async def upload_test_ui():
+    path = CLIENT_HTML / "upload-test.html"
+    return HTMLResponse(path.read_text(encoding="utf-8")) if path.exists() else HTMLResponse("Not found", 404)
+
+
 @app.get("/pipecat-client2")
 async def pipecat_client2_ui():
     path = CLIENT_HTML / "pipecat-client2.html"
@@ -543,6 +554,203 @@ async def chat_endpoint(data: ChatMessage):
         await q.put(text)
         return {"status": "ok"}
     return {"status": "error", "message": "no active connection"}
+
+
+# ---------------------------------------------------------------------------
+# Transcribe endpoint — upload WAV, test STT → LLM → TTS độc lập
+# ---------------------------------------------------------------------------
+
+_cached_transcriber = None
+_cached_piper_voice = None
+
+
+def _get_transcriber():
+    """Get cached faster-whisper model for transcribe endpoint."""
+    global _cached_transcriber
+    if _cached_transcriber is None:
+        from faster_whisper import WhisperModel
+
+        device = os.getenv("WHISPER_DEVICE", "cuda")
+        compute = os.getenv("WHISPER_COMPUTE_TYPE", "float16")
+        logger.info(f"Loading Whisper model (device={device}, compute={compute}) ...")
+        _cached_transcriber = WhisperModel(
+            "medium",
+            device=device,
+            compute_type=compute,
+        )
+        logger.info("Whisper model loaded")
+    return _cached_transcriber
+
+
+def _get_piper_voice():
+    """Get cached Piper voice for transcribe endpoint."""
+    global _cached_piper_voice
+    if _cached_piper_voice is None:
+        from piper import PiperVoice
+
+        voice_path = VOICES_DIR / "vi_VN-vais1000-medium.onnx"
+        if not voice_path.exists():
+            logger.error(f"Piper voice not found: {voice_path}")
+            return None
+        logger.info(f"Loading Piper voice: {voice_path}")
+        _cached_piper_voice = PiperVoice.load(voice_path, use_cuda=False)
+        logger.info("Piper voice loaded")
+    return _cached_piper_voice
+
+
+def _resample_int16(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """Resample int16 audio array to target sample rate using FFT."""
+    if src_rate == dst_rate:
+        return audio
+    from scipy import signal as scipy_signal
+
+    audio_float = audio.astype(np.float64)
+    dst_len = int(round(len(audio_float) * dst_rate / src_rate))
+    resampled = scipy_signal.resample(audio_float, dst_len)
+    return np.clip(resampled, -32768, 32767).astype(np.int16)
+
+
+def _pcm_to_wav(audio: np.ndarray, sample_rate: int) -> bytes:
+    """Wrap int16 PCM audio in a WAV header."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(audio.tobytes())
+    return buf.getvalue()
+
+
+@app.post("/transcribe-audio")
+async def transcribe_audio(file: UploadFile = File(...)):
+    """Upload WAV file → STT → LLM → TTS.
+
+    Returns JSON with transcription, bot text response, and optional TTS audio.
+    """
+    start = time.monotonic()
+    logger.info(f"📂 Transcribe: received '{file.filename}' ({file.content_type})")
+
+    # ── 1. Read + parse WAV ──────────────────────────────────────────────
+    contents = await file.read()
+    if len(contents) > 50 * 1024 * 1024:
+        raise HTTPException(413, "File too large (max 50MB)")
+    if len(contents) < 44:
+        raise HTTPException(400, "File too small to be a valid WAV")
+
+    try:
+        with wave.open(io.BytesIO(contents)) as wf:
+            sr = wf.getframerate()
+            channels = wf.getnchannels()
+            width = wf.getsampwidth()
+            raw = wf.readframes(wf.getnframes())
+    except Exception as e:
+        raise HTTPException(400, f"Invalid WAV: {e}")
+
+    if width != 2:
+        raise HTTPException(400, f"Only 16-bit WAV supported, got {width * 8}-bit")
+    if len(raw) < 256:
+        return {"success": False, "error": "Audio too short"}
+
+    # ── 2. Convert to mono int16 ─────────────────────────────────────────
+    audio = np.frombuffer(raw, dtype=np.int16)
+    if channels > 1:
+        audio = audio.reshape(-1, channels).mean(axis=1).astype(np.int16)
+
+    audio_duration = len(audio) / sr
+    logger.info(f"   WAV: {sr}Hz, {channels}ch, {audio_duration:.1f}s")
+
+    # ── 3. STT: Whisper ──────────────────────────────────────────────────
+    whisper_start = time.monotonic()
+
+    try:
+        model = _get_transcriber()
+        # faster-whisper expects 16kHz float32
+        audio_16k = _resample_int16(audio, sr, 16000)
+        audio_float32 = audio_16k.astype(np.float32) / 32768.0
+
+        segments, info = model.transcribe(
+            audio_float32,
+            beam_size=5,
+            language=None,  # auto-detect
+        )
+        segments = list(segments)
+        text = " ".join(s.text.strip() for s in segments if s.text.strip())
+        stt_time = time.monotonic() - whisper_start
+
+        logger.info(f"   STT ({stt_time:.2f}s): language={info.language} "
+                    f"prob={info.language_probability:.2f} -> '{text[:80]}'")
+    except Exception as e:
+        logger.exception("Whisper error")
+        return {"success": False, "error": f"STT failed: {e}"}
+
+    if not text:
+        return {"success": False, "error": "No speech detected", "duration_s": audio_duration}
+
+    # ── 4. LLM: Ollama ──────────────────────────────────────────────────
+    llm_start = time.monotonic()
+    try:
+        client = OpenAI(
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+            api_key="ollama",
+        )
+        llm_resp = client.chat.completions.create(
+            model=os.getenv("OLLAMA_MODEL", "llama3.2:latest"),
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": text},
+            ],
+            max_tokens=128,
+            temperature=0.7,
+        )
+        response_text = llm_resp.choices[0].message.content.strip()
+        llm_time = time.monotonic() - llm_start
+        logger.info(f"   LLM ({llm_time:.2f}s): '{response_text[:80]}'")
+    except Exception as e:
+        logger.exception("Ollama error")
+        response_text = ""
+        llm_time = 0.0
+
+    # ── 5. TTS: Piper ───────────────────────────────────────────────────
+    tts_time = 0.0
+    audio_b64 = None
+    if response_text:
+        try:
+            tts_start = time.monotonic()
+            voice = _get_piper_voice()
+            if voice:
+                # Collect all audio chunks
+                all_audio = bytearray()
+                for chunk in voice.synthesize(response_text):
+                    all_audio.extend(chunk.audio_int16_bytes)
+
+                if all_audio:
+                    audio_np = np.frombuffer(all_audio, dtype=np.int16)
+                    # Resample Piper native (22050) → 16000 for WAV response
+                    audio_np = _resample_int16(audio_np, 22050, 16000)
+                    wav_bytes = _pcm_to_wav(audio_np, 16000)
+                    audio_b64 = base64.b64encode(wav_bytes).decode()
+                    tts_time = time.monotonic() - tts_start
+                    logger.info(f"   TTS ({tts_time:.2f}s): {len(wav_bytes)} bytes")
+        except Exception as e:
+            logger.exception("Piper error")
+
+    total_time = time.monotonic() - start
+    logger.info(f"✅ Transcribe done in {total_time:.2f}s")
+
+    return {
+        "success": True,
+        "transcription": text,
+        "response_text": response_text,
+        "audio_base64": audio_b64,
+        "audio_sample_rate": 16000,
+        "duration_s": round(audio_duration, 2),
+        "processing_time_s": round(total_time, 2),
+        "timing": {
+            "stt_s": round(stt_time, 2),
+            "llm_s": round(llm_time, 2),
+            "tts_s": round(tts_time, 2),
+        },
+    }
 
 
 @app.get("/health")

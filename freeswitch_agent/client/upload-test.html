@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Upload WAV - Test STT/LLM/TTS</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0f0f1a; color: #e0e0e0; min-height: 100vh; display: flex; justify-content: center; padding: 20px; }
+    .container { max-width: 720px; width: 100%; }
+    h1 { font-size: 1.5rem; margin: 20px 0; color: #fff; }
+    .card { background: #1a1a2e; border: 1px solid #2d2d4a; border-radius: 12px; padding: 24px; margin-bottom: 16px; }
+    .card-title { font-size: 1rem; font-weight: 600; margin-bottom: 16px; color: #a5b4fc; }
+
+    .upload-zone { border: 2px dashed #2d2d4a; border-radius: 8px; padding: 32px; text-align: center; cursor: pointer; transition: 0.2s; }
+    .upload-zone:hover, .upload-zone.dragover { border-color: #6366f1; background: rgba(99,102,241,0.08); }
+    .upload-zone.has-file { border-color: #22c55e; background: rgba(34,197,94,0.05); }
+    .upload-icon { font-size: 2rem; margin-bottom: 8px; }
+    .upload-text { color: #9ca3af; font-size: 0.9rem; }
+    .upload-text strong { color: #e0e0e0; }
+    .file-info { display: none; margin-top: 12px; padding: 8px 12px; background: #0f0f1a; border-radius: 6px; font-size: 0.85rem; color: #9ca3af; }
+    .file-info.show { display: block; }
+
+    .btn { padding: 10px 24px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 0.95rem; transition: 0.2s; }
+    .btn-primary { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff; }
+    .btn-primary:hover { opacity: 0.9; }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-row { margin-top: 16px; display: flex; gap: 8px; align-items: center; }
+
+    .recorder-bar { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+    .recorder-bar .btn { flex-shrink: 0; }
+    .record-timer { font-size: 0.9rem; color: #9ca3af; font-variant-numeric: tabular-nums; }
+    .record-timer.recording { color: #ef4444; }
+    #record-btn.recording { background: #ef4444; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+    .status { margin-top: 12px; padding: 12px; border-radius: 8px; display: none; }
+    .status.show { display: block; }
+    .status.loading { background: rgba(99,102,241,0.1); border: 1px solid #6366f1; }
+    .status.success { background: rgba(34,197,94,0.1); border: 1px solid #22c55e; }
+    .status.error { background: rgba(239,68,68,0.1); border: 1px solid #ef4444; }
+    .status .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #6366f1; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 8px; vertical-align: middle; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .result-section { margin-top: 16px; }
+    .result-section .label { font-size: 0.8rem; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+    .result-section .value { background: #0f0f1a; padding: 12px; border-radius: 6px; font-size: 0.95rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+    .result-section .value.audio-player { padding: 8px 12px; }
+    .result-section .value.audio-player audio { width: 100%; }
+    .timing { font-size: 0.8rem; color: #6b7280; margin-top: 8px; }
+
+    .hidden { display: none; }
+    input[type="file"] { display: none; }
+
+    .or-divider { text-align: center; color: #4a5568; font-size: 0.85rem; margin: 16px 0; position: relative; }
+    .or-divider::before, .or-divider::after { content: ''; position: absolute; top: 50%; width: 40%; height: 1px; background: #2d2d4a; }
+    .or-divider::before { left: 0; }
+    .or-divider::after { right: 0; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>🎙️ Test STT → LLM → TTS</h1>
+
+  <div class="card">
+    <div class="card-title">Upload file WAV</div>
+    <div class="upload-zone" id="drop-zone">
+      <div class="upload-icon">📂</div>
+      <div class="upload-text">Kéo thả file WAV vào đây, hoặc <strong>nhấp để chọn</strong></div>
+      <div class="file-info" id="file-info"></div>
+    </div>
+    <input type="file" id="file-input" accept=".wav,audio/wav">
+
+    <div class="or-divider">hoặc</div>
+
+    <div class="card-title">Ghi âm trực tiếp</div>
+    <div class="recorder-bar">
+      <button class="btn btn-primary" id="record-btn">🎤 Ghi âm</button>
+      <span class="record-timer" id="record-timer">00:00</span>
+    </div>
+    <div class="file-info" id="recorded-info"></div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" id="submit-btn" disabled>Gửi lên</button>
+    </div>
+
+    <div class="status" id="status"></div>
+  </div>
+
+  <div class="card hidden" id="result-card">
+    <div class="card-title">Kết quả</div>
+
+    <div class="result-section" id="transcript-section">
+      <div class="label">🎯 Transcription</div>
+      <div class="value" id="transcript-text"></div>
+    </div>
+
+    <div class="result-section" id="response-section" style="margin-top:12px;">
+      <div class="label">🤖 Bot response</div>
+      <div class="value" id="response-text"></div>
+    </div>
+
+    <div class="result-section" id="audio-section" style="margin-top:12px;">
+      <div class="label">🔊 Audio response</div>
+      <div class="value audio-player" id="audio-container"></div>
+    </div>
+
+    <div class="timing" id="timing"></div>
+  </div>
+</div>
+
+<script>
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+const fileInfo = document.getElementById('file-info');
+const submitBtn = document.getElementById('submit-btn');
+const statusDiv = document.getElementById('status');
+const resultCard = document.getElementById('result-card');
+const transcriptText = document.getElementById('transcript-text');
+const responseText = document.getElementById('response-text');
+const audioContainer = document.getElementById('audio-container');
+const timingDiv = document.getElementById('timing');
+
+const recordBtn = document.getElementById('record-btn');
+const recordTimer = document.getElementById('record-timer');
+const recordedInfo = document.getElementById('recorded-info');
+
+let selectedFile = null;
+let mediaRecorder = null;
+let recordingChunks = [];
+let recordingStartTime = null;
+let recordingTimer = null;
+
+// ── Drag & drop ──
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  const files = e.dataTransfer.files;
+  if (files.length > 0) handleFile(files[0]);
+});
+
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length > 0) handleFile(fileInput.files[0]);
+});
+
+function handleFile(file) {
+  if (!file.name.endsWith('.wav') && file.type !== 'audio/wav') {
+    showStatus('error', 'Chỉ hỗ trợ file .wav');
+    return;
+  }
+  selectedFile = file;
+  dropZone.classList.add('has-file');
+  fileInfo.textContent = `📄 ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+  fileInfo.classList.add('show');
+  submitBtn.disabled = false;
+  hideStatus();
+}
+
+// ── Recording ──
+recordBtn.addEventListener('click', async () => {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    stopRecording();
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    startRecording(stream);
+  } catch (e) {
+    showStatus('error', 'Không thể truy cập microphone: ' + e.message);
+  }
+});
+
+function startRecording(stream) {
+  recordingChunks = [];
+  mediaRecorder = new MediaRecorder(stream, {
+    mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4',
+  });
+
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data.size > 0) recordingChunks.push(e.data);
+  };
+
+  mediaRecorder.onstop = async () => {
+    // Stop tracks
+    stream.getTracks().forEach(t => t.stop());
+
+    // Convert to WAV using AudioContext
+    const blob = new Blob(recordingChunks);
+    try {
+      const arrayBuffer = await blob.arrayBuffer();
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+      // Convert to mono 16000Hz WAV
+      const srcRate = audioBuffer.sampleRate;
+      const srcData = audioBuffer.getChannelData(0);
+      const targetRate = 16000;
+      const ratio = targetRate / srcRate;
+      const dstLen = Math.round(srcData.length * ratio);
+      const dstData = new Float32Array(dstLen);
+
+      // Simple linear resampling
+      for (let i = 0; i < dstLen; i++) {
+        const srcIdx = i / ratio;
+        const lo = Math.floor(srcIdx);
+        const hi = Math.min(lo + 1, srcData.length - 1);
+        const frac = srcIdx - lo;
+        dstData[i] = srcData[lo] * (1 - frac) + srcData[hi] * frac;
+      }
+
+      // Convert to Int16
+      const int16 = new Int16Array(dstLen);
+      for (let i = 0; i < dstLen; i++) {
+        const s = Math.max(-1, Math.min(1, dstData[i]));
+        int16[i] = s < 0 ? s * 32768 : s * 32767;
+      }
+
+      // Build WAV
+      const wavHeader = new ArrayBuffer(44);
+      const dv = new DataView(wavHeader);
+      dv.setUint32(0, 0x52494646, false); // RIFF
+      dv.setUint32(4, 36 + dstLen * 2, true);
+      dv.setUint32(8, 0x57415645, false); // WAVE
+      dv.setUint32(12, 0x666D7420, false); // fmt
+      dv.setUint32(16, 16, true);
+      dv.setUint16(20, 1, true); // PCM
+      dv.setUint16(22, 1, true); // mono
+      dv.setUint32(24, targetRate, true);
+      dv.setUint32(28, targetRate * 2, true);
+      dv.setUint16(32, 2, true);
+      dv.setUint16(34, 16, true);
+      dv.setUint32(36, 0x64617461, false); // data
+      dv.setUint32(40, dstLen * 2, true);
+
+      const wavBlob = new Blob([wavHeader, int16.buffer]);
+      const fileName = `recording_${Date.now()}.wav`;
+
+      selectedFile = new File([wavBlob], fileName, { type: 'audio/wav' });
+      recordedInfo.textContent = `🎤 ${fileName} (${(selectedFile.size / 1024).toFixed(1)} KB, ${targetRate}Hz)`;
+      recordedInfo.classList.add('show');
+      submitBtn.disabled = false;
+      showStatus('success', `Ghi âm thành công! Nhấn "Gửi lên" để test.`);
+    } catch (e) {
+      showStatus('error', 'Lỗi xử lý audio: ' + e.message);
+    }
+  };
+
+  mediaRecorder.start();
+  recordBtn.textContent = '⏹ Dừng';
+  recordBtn.classList.add('recording');
+  recordingStartTime = Date.now();
+  recordingTimer = setInterval(updateTimer, 100);
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+    recordBtn.textContent = '🎤 Ghi âm';
+    recordBtn.classList.remove('recording');
+    clearInterval(recordingTimer);
+    recordingTimer = null;
+  }
+}
+
+function updateTimer() {
+  if (!recordingStartTime) return;
+  const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+  const m = String(Math.floor(elapsed / 60)).padStart(2, '0');
+  const s = String(elapsed % 60).padStart(2, '0');
+  recordTimer.textContent = `${m}:${s}`;
+  recordTimer.classList.add('recording');
+}
+
+// ── Submit ──
+submitBtn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+
+  submitBtn.disabled = true;
+  showStatus('loading', '⏳ Đang xử lý audio...');
+
+  const formData = new FormData();
+  formData.append('file', selectedFile);
+
+  try {
+    const resp = await fetch('/transcribe-audio', {
+      method: 'POST',
+      body: formData,
+    });
+    const data = await resp.json();
+
+    if (!data.success) {
+      showStatus('error', data.error || 'Lỗi không xác định');
+      submitBtn.disabled = false;
+      return;
+    }
+
+    showStatus('success', '✅ Xử lý thành công!');
+    resultCard.classList.remove('hidden');
+
+    transcriptText.textContent = data.transcription || '(trống)';
+    responseText.textContent = data.response_text || '(trống)';
+
+    if (data.audio_base64) {
+      const wavSrc = 'data:audio/wav;base64,' + data.audio_base64;
+      audioContainer.innerHTML = `<audio controls src="${wavSrc}"></audio>`;
+    } else {
+      audioContainer.innerHTML = '(không có audio)';
+    }
+
+    if (data.timing) {
+      timingDiv.textContent = `⏱ STT: ${data.timing.stt_s}s · LLM: ${data.timing.llm_s}s · TTS: ${data.timing.tts_s}s · Tổng: ${data.processing_time_s}s`;
+    }
+
+  } catch (e) {
+    showStatus('error', 'Lỗi kết nối: ' + e.message);
+  }
+
+  submitBtn.disabled = false;
+});
+
+// ── UI helpers ──
+function showStatus(type, msg) {
+  statusDiv.className = 'status show ' + type;
+  if (type === 'loading') {
+    statusDiv.innerHTML = `<span class="spinner"></span> ${msg}`;
+  } else {
+    statusDiv.textContent = msg;
+  }
+}
+
+function hideStatus() {
+  statusDiv.className = 'status';
+}
+</script>
+</body>
+</html>
