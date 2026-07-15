@@ -328,9 +328,11 @@ if __name__ == "__main__":
     from pathlib import Path
 
     from fastapi.responses import HTMLResponse
+    from fastapi.staticfiles import StaticFiles
     from pipecat.runner.run import app, main
 
     CLIENT_HTML = Path(__file__).parent / "client" / "index.html"
+    CLIENT_PRE = Path(__file__).parent / "client-pre"
 
     @app.get("/", include_in_schema=False)
     async def custom_client():
@@ -338,5 +340,8 @@ if __name__ == "__main__":
         if CLIENT_HTML.exists():
             return HTMLResponse(CLIENT_HTML.read_text(encoding="utf-8"))
         return HTMLResponse("<h1>Chưa tìm thấy client/index.html</h1>", status_code=404)
+
+    if CLIENT_PRE.is_dir():
+        app.mount("/client-pre", StaticFiles(directory=str(CLIENT_PRE), html=True))
 
     main()
