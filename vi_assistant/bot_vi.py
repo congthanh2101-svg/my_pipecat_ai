@@ -44,7 +44,7 @@ from pipecat.runner.types import (
 )
 import json
 
-from pipecat.frames.frames import Frame, InputTransportMessageFrame, InterruptionFrame
+from pipecat.frames.frames import Frame, InputTransportMessageFrame
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
 import pipecat.processors.frameworks.rtvi.models as RTVI
 from pipecat.services.ollama.llm import OLLamaLLMService
@@ -101,15 +101,6 @@ class RTVIWebSocketSerializer(ProtobufFrameSerializer):
     def __init__(self):
         super().__init__()
         # ProtobufFrameSerializer.__init__() đã set ignore_rtvi_messages = False
-
-    async def serialize(self, frame: Frame) -> str | bytes | None:
-        # Chỉ serialize các frame mà client có thể hiểu được.
-        # Client (iK.deserialize) chỉ support "audio" và "message".
-        # Mọi thứ khác (interruption, text, transcription) sẽ gây lỗi
-        # "Unknown frame kind" trên client.
-        if isinstance(frame, InterruptionFrame):
-            return None
-        return await super().serialize(frame)
 
     async def deserialize(self, data: str | bytes) -> Frame | None:
         # Text → RTVI JSON (fallback cho client text-based)
