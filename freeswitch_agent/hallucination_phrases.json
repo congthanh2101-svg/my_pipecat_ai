@@ -1,0 +1,21 @@
+{
+  "exact_phrases": [
+    "hãy subscribe cho kênh la la school để không bỏ lỡ những video hấp dẫn",
+    "cảm ơn các bạn đã theo dõi và hẹn gặp lại",
+    "hẹn gặp lại các bạn trong những video tiếp theo",
+    "cảm ơn các bạn đã theo dõi"
+  ],
+  "patterns": [
+    "h[aáàảãạăâấầẩẫậ]y\\s+subscribe",
+    "đăng\\s*k[yý]\\s+k[eêế]nh",
+    "nh[ơớ]\\s+(like|share|subscribe|đăng\\s*k[yý])",
+    "c[ảa]m\\s*ơn\\s+c[áa]c\\s+b[aạ]n\\s+đ[aã]\\s+theo\\s*d[oõ]i",
+    "h[eẹ]n\\s+g[ặa]p\\s+l[aạ]i.*(video|c[áa]c\\s+b[aạ]n)",
+    "đ[uừ]ng\\s+qu[eê]n.*(like|share|subscribe|đăng\\s*k[yý])",
+    "video\\s+ti[eế]p\\s*theo",
+    "nh[ớơ]\\s+like.*share",
+    "cùng\\s+đón\\s+xem"
+  ],
+  "fuzzy_threshold": 0.82,
+  "min_len_for_fuzzy": 15
+}
