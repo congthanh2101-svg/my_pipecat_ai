@@ -255,7 +255,7 @@ async def connect_endpoint():
     """Pipecat Client SDK gọi POST /connect → nhận wsUrl.
     Client có CONNECT_URL cứng = http://localhost:8086/connect nên dùng ws://
     """
-    ws_url = "ws://localhost:8086/rtvi-ws"
+    ws_url = "wss://web.securityzone.vn:8086/rtvi-ws"
     logger.info(f"POST /connect → {ws_url}")
     return {"wsUrl": ws_url}
 

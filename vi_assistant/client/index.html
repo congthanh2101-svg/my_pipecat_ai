@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Trợ Lý Giọng Nói</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .container {
+            background: #1e293b;
+            border-radius: 24px;
+            padding: 48px;
+            width: 420px;
+            max-width: 90vw;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.5);
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            margin-bottom: 8px;
+            color: #f8fafc;
+        }
+
+        .subtitle {
+            color: #94a3b8;
+            margin-bottom: 32px;
+            font-size: 0.9rem;
+        }
+
+        /* Avatar / Status indicator */
+        .avatar {
+            width: 120px;
+            height: 120px;
+            margin: 0 auto 24px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 48px;
+            transition: all 0.3s ease;
+            box-shadow: 0 0 30px rgba(59,130,246,0.3);
+        }
+
+        .avatar.listening {
+            animation: pulse 2s ease-in-out infinite;
+        }
+        .avatar.speaking {
+            background: linear-gradient(135deg, #22c55e, #16a34a);
+            animation: pulse 0.8s ease-in-out infinite;
+        }
+        .avatar.error {
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); box-shadow: 0 0 30px rgba(59,130,246,0.3); }
+            50% { transform: scale(1.05); box-shadow: 0 0 50px rgba(59,130,246,0.5); }
+        }
+
+        /* Status text */
+        .status {
+            margin-bottom: 24px;
+            font-size: 0.95rem;
+            color: #94a3b8;
+        }
+        .status .highlight {
+            color: #22c55e;
+            font-weight: 600;
+        }
+        .status .connecting {
+            color: #facc15;
+        }
+        .status .error-text {
+            color: #ef4444;
+        }
+
+        /* Button */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 14px 36px;
+            border: none;
+            border-radius: 50px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: #3b82f6;
+            color: white;
+        }
+        .btn:hover { background: #2563eb; transform: translateY(-1px); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+        .btn.danger { background: #ef4444; }
+        .btn.danger:hover { background: #dc2626; }
+
+        /* Conversation log */
+        .log {
+            margin-top: 24px;
+            max-height: 200px;
+            overflow-y: auto;
+            text-align: left;
+            background: #0f172a;
+            border-radius: 12px;
+            padding: 16px;
+            font-size: 0.85rem;
+            line-height: 1.6;
+        }
+        .log::-webkit-scrollbar { width: 4px; }
+        .log::-webkit-scrollbar-thumb { background: #475569; border-radius: 2px; }
+
+        .log .user {
+            color: #60a5fa;
+        }
+        .log .bot {
+            color: #4ade80;
+        }
+        .log .info {
+            color: #94a3b8;
+            font-style: italic;
+        }
+        .log .error {
+            color: #ef4444;
+        }
+
+        .volume-indicator {
+            margin-top: 16px;
+            height: 6px;
+            background: #334155;
+            border-radius: 3px;
+            overflow: hidden;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .volume-indicator.active { opacity: 1; }
+        .volume-indicator .bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+            border-radius: 3px;
+            transition: width 0.1s;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="avatar" id="avatar">🎤</div>
+        <h1>Trợ Lý Giọng Nói</h1>
+        <p class="subtitle">Pipecat AI · Whisper · Ollama · Piper</p>
+
+        <div class="status" id="status">
+            Nhấn "Kết nối" để bắt đầu
+        </div>
+
+        <button class="btn" id="connectBtn">
+            <span>🔌</span> Kết nối
+        </button>
+
+        <div class="volume-indicator" id="volumeIndicator">
+            <div class="bar" id="volumeBar"></div>
+        </div>
+
+        <div class="log" id="log"></div>
+    </div>
+
+    <script>
+        // ===================================================================
+        //  DOM refs
+        // ===================================================================
+        const $ = id => document.getElementById(id);
+        const avatar  = $('avatar');
+        const status  = $('status');
+        const btn     = $('connectBtn');
+        const log     = $('log');
+        const volBar  = $('volumeBar');
+        const volInd  = $('volumeIndicator');
+
+        // ===================================================================
+        //  State
+        // ===================================================================
+        const BOT_URL = window.location.origin;  // http://localhost:7860
+
+        let pc             = null;   // RTCPeerConnection
+        let dc             = null;   // DataChannel
+        let localStream    = null;   // Microphone stream
+        let pcId           = null;   // Peer connection ID from server
+        let connected      = false;
+        let pendingCandidates = [];
+
+        // ===================================================================
+        //  Logging
+        // ===================================================================
+        function addLog(cls, msg) {
+            const d = document.createElement('div');
+            d.className = cls;
+            d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            log.appendChild(d);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function setStatus(text, cls = '') {
+            status.innerHTML = text;
+            status.className = cls ? cls : '';
+        }
+
+        function setAvatarState(state) {
+            avatar.className = 'avatar' + (state ? ' ' + state : '');
+        }
+
+        // ===================================================================
+        //  Microphone
+        // ===================================================================
+        async function getMicrophone() {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    sampleRate: 16000,
+                }
+            });
+
+            // Volume meter
+            const ctx = new AudioContext();
+            const src = ctx.createMediaStreamSource(stream);
+            const analyser = ctx.createAnalyser();
+            analyser.fftSize = 256;
+            src.connect(analyser);
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+            function updateVolume() {
+                if (!connected) return;
+                analyser.getByteFrequencyData(dataArray);
+                const avg = dataArray.reduce((a,b)=>a+b,0) / dataArray.length;
+                const pct = Math.min(100, avg * 3);
+                volBar.style.width = pct + '%';
+                volInd.classList.toggle('active', pct > 2);
+                requestAnimationFrame(updateVolume);
+            }
+            // Delay start until connected
+            setTimeout(() => { if (connected) updateVolume(); }, 1000);
+
+            return stream;
+        }
+
+        // ===================================================================
+        //  WebRTC Signaling
+        // ===================================================================
+        async function createOffer() {
+            addLog('info', '🔄 Đang tạo WebRTC offer...');
+            setStatus('🔄 Đang kết nối...', 'connecting');
+            setAvatarState('listening');
+
+            // 1. Microphone
+            localStream = await getMicrophone();
+            addLog('info', '✅ Microphone sẵn sàng');
+
+            // 2. RTCPeerConnection with default STUN
+            pc = new RTCPeerConnection({
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                ]
+            });
+
+            // 3. Add audio track
+            localStream.getAudioTracks().forEach(track => {
+                pc.addTrack(track, localStream);
+            });
+
+            // 4. Listen for ICE candidates → queue or send immediately
+            pc.onicecandidate = (event) => {
+                if (!event.candidate) return;
+                const c = event.candidate;
+                // ⚠️ Dùng snake_case cho server Python
+                const candidateData = {
+                    candidate: c.candidate,
+                    sdp_mid: c.sdpMid,
+                    sdp_mline_index: c.sdpMLineIndex,
+                };
+                if (pcId) {
+                    sendIceCandidate(candidateData);
+                } else {
+                    pendingCandidates.push(candidateData);
+                }
+            };
+
+            // 5. Receive bot audio track
+            pc.ontrack = (event) => {
+                addLog('info', '🔊 Nhận audio từ bot');
+                const audioEl = document.createElement('audio');
+                audioEl.srcObject = event.streams[0];
+                audioEl.autoplay = true;
+            };
+
+            // 6. Connection state
+            pc.onconnectionstatechange = () => {
+                const state = pc.connectionState;
+                addLog('info', `📡 WebRTC: ${state}`);
+                if (state === 'connected') {
+                    connected = true;
+                    setStatus('✅ Đã kết nối! Đang nói chuyện...', '');
+                    setAvatarState('listening');
+                    btn.textContent = '🔌 Ngắt kết nối';
+                    btn.className = 'btn danger';
+                } else if (state === 'disconnected' || state === 'failed') {
+                    disconnect();
+                }
+            };
+
+            // 7. Data channel (for signaling pings)
+            dc = pc.createDataChannel('chat');
+            dc.onopen = () => addLog('info', '📨 Data channel sẵn sàng');
+            dc.onmessage = (e) => {
+                try {
+                    const msg = JSON.parse(e.data);
+                    if (msg.type === 'signalling') {
+                        // Bot signalling messages
+                    } else if (msg.type === 'transcription') {
+                        addLog('user', `🗣️ ${msg.text || msg.transcript || ''}`);
+                        setAvatarState('listening');
+                    } else if (msg.type === 'bot-started-speaking') {
+                        setAvatarState('speaking');
+                    } else if (msg.type === 'bot-stopped-speaking') {
+                        setAvatarState('listening');
+                    }
+                } catch {}
+            };
+
+            // 8. Create SDP offer
+            const offer = await pc.createOffer({
+                offerToReceiveAudio: true,
+                offerToReceiveVideo: false,
+            });
+            await pc.setLocalDescription(offer);
+            addLog('info', '📤 Đã tạo offer, gửi đến server...');
+
+            // 9. Send offer to server
+            const resp = await fetch(`${BOT_URL}/api/offer`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sdp: offer.sdp,
+                    type: offer.type,
+                }),
+            });
+
+            if (!resp.ok) {
+                const errText = await resp.text();
+                throw new Error(`Server trả về ${resp.status}: ${errText}`);
+            }
+
+            const answer = await resp.json();
+            pcId = answer.pc_id;
+
+            // Gửi ngay ICE candidates đã queue trong lúc chờ pcId
+            pendingCandidates.forEach(c => sendIceCandidate(c));
+            pendingCandidates = [];
+
+            await pc.setRemoteDescription(new RTCSessionDescription({
+                sdp: answer.sdp,
+                type: answer.type,
+            }));
+
+            addLog('info', '✅ Kết nối WebRTC thành công!');
+            addLog('info', '🎤 Bắt đầu nói chuyện...');
+        }
+
+        // ===================================================================
+        //  Send ICE candidate
+        // ===================================================================
+        async function sendIceCandidate(candidate) {
+            try {
+                const resp = await fetch(`${BOT_URL}/api/offer`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        pc_id: pcId,
+                        candidates: [candidate],
+                    }),
+                });
+                if (!resp.ok) {
+                    const text = await resp.text();
+                    addLog('error', `❌ ICE candidate lỗi ${resp.status}: ${text.substring(0,100)}`);
+                }
+            } catch (err) {
+                addLog('error', `❌ Lỗi gửi ICE candidate: ${err.message}`);
+            }
+        }
+
+        // ===================================================================
+        //  Disconnect
+        // ===================================================================
+        function disconnect() {
+            if (dc)   { dc.close(); dc = null; }
+            if (pc)   { pc.close(); pc = null; }
+            if (localStream) {
+                localStream.getTracks().forEach(t => t.stop());
+                localStream = null;
+            }
+            connected = false;
+            pcId = null;
+            pendingCandidates = [];
+            volInd.classList.remove('active');
+
+            setStatus('🔌 Đã ngắt kết nối');
+            setAvatarState('');
+            btn.textContent = '🔌 Kết nối lại';
+            btn.className = 'btn';
+            addLog('info', '👋 Đã ngắt kết nối');
+        }
+
+        // ===================================================================
+        //  Connect / Disconnect button
+        // ===================================================================
+        btn.addEventListener('click', async () => {
+            if (connected) {
+                disconnect();
+                return;
+            }
+            try {
+                btn.disabled = true;
+                btn.textContent = '⏳ Đang kết nối...';
+                await createOffer();
+            } catch (err) {
+                addLog('error', `❌ Lỗi: ${err.message}`);
+                setStatus(`❌ ${err.message}`, 'error-text');
+                setAvatarState('error');
+                disconnect();
+            } finally {
+                btn.disabled = false;
+            }
+        });
+
+        addLog('info', `🌐 Bot URL: ${BOT_URL}`);
+        addLog('info', '👆 Nhấn "Kết nối" để bắt đầu');
+    </script>
+</body>
+</html>

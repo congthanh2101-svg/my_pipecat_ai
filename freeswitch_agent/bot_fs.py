@@ -84,6 +84,8 @@ from hallucination_filter import HallucinationFilter
 from pronunciation_normalizer import PronunciationNormalizer
 from omnivoice_tts import OmniVoiceTTSService
 from call_logger import CallLogger, extract_conversation
+from knowledge_base import KnowledgeBase, get_knowledge_base
+from rag_processor import RAGProcessor
 
 import logging
 
@@ -262,6 +264,11 @@ SYSTEM_PROMPT = (
     "hãy nói 'Dạ, em chưa nghe rõ, anh/chị nói lại được không ạ!'\n"
     "- KHÔNG BAO GIỜ tự bịa ra câu trả lời. Nếu không biết, hãy nói không biết."
 )
+
+# RAG (Retrieval-Augmented Generation) — kiến thức nội bộ
+RAG_ENABLED = os.getenv("RAG_ENABLED", "true").lower() == "true"
+RAG_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
+_knowledge_base: KnowledgeBase | None = None
 
 
 app = FastAPI(title="FreeSWITCH Voice Agent")
@@ -1137,6 +1144,7 @@ async def create_pipeline(
     stt: WhisperSTTService,
     llm: OLLamaLLMService,
     tts: PiperTTSService,
+    knowledge_base: KnowledgeBase | None = None,
 ) -> tuple[PipelineWorker, LLMContext]:
     """Create a Pipecat pipeline using SileroVADAnalyzer (standard pattern).
 
@@ -1178,10 +1186,21 @@ async def create_pipeline(
         HallucinationFilter(HALLUCINATION_CONFIG_PATH),
         # DebugFrameLogger("3-after-stt"),
         user_agg,
+    ]
+
+    # RAGProcessor: chèn kiến thức nội bộ trước mỗi lượt LLM generation
+    if knowledge_base is not None and knowledge_base.count() > 0:
+        rag = RAGProcessor(context, knowledge_base, top_k=RAG_TOP_K)
+        pipeline_steps.append(rag)
+        logger.info(f"📚 RAGProcessor enabled ({knowledge_base.count()} chunks, top_k={RAG_TOP_K})")
+    else:
+        logger.info("📚 RAGProcessor disabled (no knowledge base)")
+
+    pipeline_steps.extend([
         llm,
         # TextDebugLogger("llm-to-tts"),
         MarkdownStripper(),   # Strip markdown/emoji TRƯỚC, để PronNorm xử lý text sạch
-    ]
+    ])
 
     if PRONUNCIATION_NORMALIZER_ENABLED:
         logger.info("🔤 PronunciationNormalizer: ENABLED (strip markdown → normalize → TTS)")
@@ -1310,7 +1329,7 @@ async def rtvi_websocket(ws: WebSocket):
             await ws.close(code=1011)
             return
 
-        worker, context = await create_pipeline(transport, stt, llm, tts)
+        worker, context = await create_pipeline(transport, stt, llm, tts, knowledge_base=_knowledge_base)
 
         # RTVI greeting (fires after RTVI handshake completes)
         @worker.rtvi.event_handler("on_client_ready")
@@ -1432,7 +1451,7 @@ async def audio_stream(ws: WebSocket):
             await ws.close(code=1011)
             return
 
-        worker, context = await create_pipeline(transport, stt, llm, tts)
+        worker, context = await create_pipeline(transport, stt, llm, tts, knowledge_base=_knowledge_base)
 
         # L16 greeting (fires on transport connect)
         @transport.event_handler("on_client_connected")
@@ -1788,6 +1807,85 @@ async def get_calls(limit: int = 10):
 @app.get("/health")
 async def health():
     return {"status": "ok", "active_connections": len(_active_connections)}
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Base API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/knowledge")
+async def knowledge_list():
+    """Xem danh sách documents trong knowledge base."""
+    if _knowledge_base is None:
+        return {"success": False, "error": "RAG not enabled"}
+    return {"success": True, "documents": _knowledge_base.list_documents(), "total_chunks": _knowledge_base.count()}
+
+
+class KnowledgeUploadRequest(BaseModel):
+    filename: str
+    content: str
+
+
+@app.post("/api/knowledge/upload")
+async def knowledge_upload(data: KnowledgeUploadRequest):
+    """Upload document vào knowledge base."""
+    if _knowledge_base is None:
+        return {"success": False, "error": "RAG not enabled"}
+
+    # Validate filename
+    if not data.filename.endswith((".txt", ".md", ".json")):
+        return {"success": False, "error": "Chỉ hỗ trợ .txt, .md, .json"}
+
+    # Save to file
+    from pathlib import Path
+    kb_dir = Path(__file__).parent / "knowledge"
+    kb_dir.mkdir(exist_ok=True)
+    fpath = kb_dir / data.filename
+    fpath.write_text(data.content, encoding="utf-8")
+
+    # Index
+    added = _knowledge_base._index_file(fpath)
+    return {"success": True, "filename": data.filename, "chunks_added": added, "total_chunks": _knowledge_base.count()}
+
+
+@app.post("/api/knowledge/reindex")
+async def knowledge_reindex():
+    """Re-index tất cả documents trong knowledge/."""
+    if _knowledge_base is None:
+        return {"success": False, "error": "RAG not enabled"}
+    added = _knowledge_base.index_directory()
+    return {"success": True, "chunks_added": added, "total_chunks": _knowledge_base.count()}
+
+
+@app.delete("/api/knowledge/{source}")
+async def knowledge_delete(source: str):
+    """Xoá document khỏi knowledge base."""
+    if _knowledge_base is None:
+        return {"success": False, "error": "RAG not enabled"}
+    deleted = _knowledge_base.delete_document(source)
+    return {"success": True, "source": source, "chunks_deleted": deleted, "total_chunks": _knowledge_base.count()}
+
+
+# ---------------------------------------------------------------------------
+# Startup — khởi tạo knowledge base
+# ---------------------------------------------------------------------------
+@app.on_event("startup")
+async def startup():
+    global _knowledge_base
+    if not RAG_ENABLED:
+        logger.info("📚 RAG disabled via RAG_ENABLED=false")
+        return
+
+    # Khởi tạo knowledge base (lazy — chỉ load model khi cần)
+    try:
+        _knowledge_base = KnowledgeBase()
+        if _knowledge_base.count() == 0:
+            _knowledge_base.index_directory()
+        logger.info(f"📚 RAG ready: {_knowledge_base.count()} chunks from {len(_knowledge_base.list_documents())} documents")
+    except Exception as e:
+        logger.error(f"📚 RAG init failed: {e}")
+        logger.exception(e)
+        _knowledge_base = None
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@
             </div>
           </div>
           <button id="btn-connect" class="btn btn-connect">Connect</button>
+          <button id="btn-mic" class="btn btn-mic" disabled>🎤 Mic: ON</button>
           <div class="status-row">
             <span id="status-indicator" class="status-dot status-red"></span>
             <span id="status-text" class="status-text">Disconnected</span>
@@ -63,12 +64,13 @@
     </div>
 
     <footer class="app-footer">
-      Pipecat Client Web &mdash; Approach C1 (Vite + Vanilla TypeScript)
+      <!-- footer -->
     </footer>
   </div>
 
   <!-- Chat bar -->
   <div id="chat-bar" style="position:fixed;bottom:0;left:0;right:0;background:#1a1a2e;border-top:1px solid #2d2d4a;padding:8px 12px;display:none;align-items:center;gap:8px;z-index:1000;">
+    <button id="btn-replay" title="Nghe lại câu vừa nói" style="padding:8px 14px;border:none;border-radius:8px;background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;font-weight:600;cursor:pointer;font-size:14px;">🔁 Replay</button>
     <input id="chat-input" type="text" placeholder="Nhập tin nhắn text..." style="flex:1;padding:8px 12px;border-radius:8px;border:1px solid #2d2d4a;background:#0f0f1a;color:#e0e0e0;font-size:14px;outline:none;">
     <button id="chat-send" style="padding:8px 20px;border:none;border-radius:8px;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;font-weight:600;cursor:pointer;font-size:14px;">Send</button>
   </div>
@@ -91,12 +93,33 @@
     const text = chatInput.value.trim();
     if (!text) return;
     chatInput.value = '';
+    // Show user's chat message in transcript
+    if (window.addTranscript) {
+      window.addTranscript('user', text);
+    } else {
+      // Fallback: manually add to transcript
+      const el = document.getElementById('transcript');
+      if (el) {
+        const d = document.createElement('div');
+        d.className = 'transcript-entry transcript-user';
+        d.innerHTML = '<span class="transcript-label">You</span><span class="transcript-text">' + text.replace(/</g,'&lt;') + '</span>';
+        el.appendChild(d);
+        el.scrollTop = el.scrollHeight;
+      }
+    }
     try {
-      await fetch('/chat', {
+      const resp = await fetch('https://web.securityzone.vn:8086/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
       });
+      // If server returns bot response text, show it
+      if (resp.ok && window.addTranscript) {
+        const reply = await resp.json().catch(() => null);
+        if (reply && (reply.text || reply.response || reply.message)) {
+          window.addTranscript('bot', reply.text || reply.response || reply.message);
+        }
+      }
     } catch (e) {
       console.error('Chat error:', e);
     }

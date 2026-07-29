@@ -1,0 +1,38 @@
+--- a/audio_streamer_glue.cpp
++++ b/audio_streamer_glue.cpp
+@@ -14,6 +14,7 @@
+ #include "audio_streamer_glue.h"
+ #include "base64.h"
+ #include "mod_audio_stream.h"
++#include "protobuf_audio.h"
+
+ #define MY_BUG_NAME "audio_stream"
+ #define MAX_SESSION_NAME_LEN 256
+@@ -285,8 +286,24 @@ public:
+     }
+
+     void writeBinary(uint8_t *buffer, size_t len) override
+     {
+         if (!this->isConnected())
+             return;
+-        webSocket.sendBinary(ix::IXWebSocketSendData((char *)buffer, len));
++
++        // PIPECAT FIX: Wrap audio in protobuf format
++        // Allocate buffer for protobuf frame (audio + ~50 bytes overhead)
++        size_t protobuf_max_size = len + 50;
++        uint8_t *protobuf_buffer = (uint8_t *)malloc(protobuf_max_size);
++        if (!protobuf_buffer) {
++            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
++                "Failed to allocate protobuf buffer\n");
++            return;
++        }
++
++        // Build protobuf frame (assuming 16kHz mono from resampler)
++        size_t protobuf_len = build_audio_raw_frame(buffer, len, 16000, 1, protobuf_buffer);
++
++        webSocket.sendBinary(ix::IXWebSocketSendData((char *)protobuf_buffer, protobuf_len));
++
++        free(protobuf_buffer);
+     }
+
+     void writeText(const char *text) override

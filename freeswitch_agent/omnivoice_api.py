@@ -42,7 +42,7 @@ from omnivoice import OmniVoice, VoiceClonePrompt
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Config
+# Config "OMNIVOICE_API_MODEL", "k2-fsa/OmniVoice"
 # ---------------------------------------------------------------------------
 _DEFAULT_MODEL = os.getenv("OMNIVOICE_API_MODEL", "k2-fsa/OmniVoice")
 _DEFAULT_DEVICE = os.getenv("OMNIVOICE_API_DEVICE", "cuda:0")
@@ -576,7 +576,8 @@ async def tts_generate_mp3(body: GenerateMP3Request = Body(...)):
             num_step=body.num_step,
         )
 
-        hash_key = f"{body.voice_name}:{body.language or ''}:{body.bitrate}:{body.text}"
+        # hash_key = f"{body.voice_name}:{body.language or ''}:{body.bitrate}:{body.text}"
+        hash_key = f"{body.voice_name}:{body.text}"
         filename = _hash_filename(hash_key, suffix=".mp3")
         path = _save_mp3(audios[0], filename, bitrate=body.bitrate)
 
