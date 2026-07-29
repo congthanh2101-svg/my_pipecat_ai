@@ -6,7 +6,7 @@ Rewrite based on pipecat-examples/websocket pattern:
 - WorkerRunner lifecycle (instead of manual TaskManager)
 - worker.rtvi.event_handler("on_client_ready") for RTVI greetingPiperVoice
 
-STT: Whisper (large-v3) / VietASR (Zipformer) | LLM: Ollama/Deepseek | TTS: Piper/OmniVoice
+STT: Whisper (large-v3) / VietASR (Zipformer) / Gipformer (Zipformer) | LLM: Ollama/Deepseek | TTS: Piper/OmniVoice
 
 Endpoints:
   /audio-stream   → L16 PCM (FreeSWITCH mod_audio_stream / browser)
@@ -84,6 +84,7 @@ from hallucination_filter import HallucinationFilter
 from pronunciation_normalizer import PronunciationNormalizer
 from omnivoice_tts import OmniVoiceTTSService
 from vietasr_stt import VietASRSTTService
+from gipformer_stt import GipformerSTTService
 from call_logger import CallLogger, extract_conversation
 from knowledge_base import KnowledgeBase, get_knowledge_base
 from rag_processor import RAGProcessor
@@ -234,10 +235,13 @@ load_dotenv(override=True)
 # ---------------------------------------------------------------------------
 VOICES_DIR = Path(os.getenv("PIPER_VOICES_DIR", "/opt/ollama-playground/local-voice-agent/voices"))
 
-# STT Provider: "whisper" (mặc định) hoặc "vietasr"
+# STT Provider: "whisper" (mặc định), "vietasr", hoặc "gipformer"
 STT_PROVIDER = os.getenv("STT_PROVIDER", "whisper").lower()
 VIETASR_MODEL_DIR = os.getenv("VIETASR_MODEL_DIR", str(Path(__file__).parent / "models" / "vietasr"))
 VIETASR_PROVIDER = os.getenv("VIETASR_PROVIDER", "cuda")
+GIPFORMER_MODEL_DIR = os.getenv("GIPFORMER_MODEL_DIR", str(Path(__file__).parent / "models" / "gipformer"))
+GIPFORMER_USE_INT8 = os.getenv("GIPFORMER_USE_INT8", "false").lower() == "true"
+GIPFORMER_PROVIDER = os.getenv("GIPFORMER_PROVIDER", "cuda")
 
 # LLM Provider: "ollama" (local) hoặc "deepseek" (API cloud)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
@@ -1014,6 +1018,38 @@ class RTVICompatibleSerializer(ProtobufFrameSerializer):
 # ---------------------------------------------------------------------------
 # Shared GPU model weights (not processors) — singleton to avoid GPU OOM
 # ---------------------------------------------------------------------------
+# ThinkingDelayProcessor — thêm khoảng dừng tự nhiên trước khi bot trả lời
+# ---------------------------------------------------------------------------
+class ThinkingDelayProcessor(FrameProcessor):
+    """Chèn delay trước TTSStartedFrame đầu tiên để bot có cảm giác đang 'suy nghĩ'.
+
+    Đặt giữa LLM (hoặc MarkdownStripper) và TTS trong pipeline.
+    Delay chỉ áp dụng cho TTSStartedFrame đầu tiên sau mỗi TTSStoppedFrame
+    (tức đầu mỗi lượt bot nói, không delay giữa các câu trong cùng một lượt).
+    """
+
+    def __init__(self, delay_ms: float = 800):
+        super().__init__()
+        self._delay_s = delay_ms / 1000.0
+        self._pending = True  # delay lần TTSStarted đầu tiên sau mỗi TTSStopped
+
+    async def process_frame(self, frame, direction):
+        # Xử lý delay TRƯỚC khi gọi super, để super push frame đi sau khi đã delay
+        if direction == FrameDirection.DOWNSTREAM:
+            if isinstance(frame, TTSStartedFrame):
+                if self._pending:
+                    logger.info(f"⏳ Thinking delay {self._delay_s*1000:.0f}ms...")
+                    await asyncio.sleep(self._delay_s)
+                    self._pending = False
+            elif isinstance(frame, TTSStoppedFrame):
+                self._pending = True  # reset cho lần nói tiếp theo
+        # super xử lý state (StartFrame→__start, CancelFrame→__cancel, ...)
+        await super().process_frame(frame, direction)
+        # push tiếp frame xuống processor sau trong pipeline
+        await self.push_frame(frame, direction)
+
+
+# ---------------------------------------------------------------------------
 _shared_whisper_model: "WhisperModel | None" = None
 _shared_piper_voice: "PiperVoice | None" = None
 
@@ -1072,7 +1108,7 @@ def create_services() -> tuple:
             return None, None, None
         load_piper_voice()
 
-    # STT: lua chon provider (whisper mac dinh, vietasr cho tieng Viet)
+    # STT: lua chon provider (whisper mac dinh, vietasr/gipformer cho tieng Viet)
     if STT_PROVIDER == "vietasr":
         stt = VietASRSTTService(
             model_dir=VIETASR_MODEL_DIR,
@@ -1080,6 +1116,15 @@ def create_services() -> tuple:
             decoding_method="greedy_search",
         )
         logger.info(f"VN STT: VietASR (model_dir={VIETASR_MODEL_DIR}, provider={VIETASR_PROVIDER})")
+    elif STT_PROVIDER == "gipformer":
+        stt = GipformerSTTService(
+            model_dir=GIPFORMER_MODEL_DIR,
+            provider=GIPFORMER_PROVIDER,
+            use_int8=GIPFORMER_USE_INT8,
+            decoding_method="greedy_search",
+        )
+        logger.info(f"VN STT: Gipformer (model_dir={GIPFORMER_MODEL_DIR}, "
+                    f"provider={GIPFORMER_PROVIDER}, int8={GIPFORMER_USE_INT8})")
     else:
         stt = DebugWhisperSTTService(
             device=os.getenv("WHISPER_DEVICE", "cuda"),
@@ -1175,7 +1220,7 @@ async def create_pipeline(
     vad = VADProcessor(
         vad_analyzer=SileroVADAnalyzer(
             sample_rate=8000,
-            params=VADParams(confidence=0.85, min_volume=0.5),
+            params=VADParams(confidence=0.85, min_volume=0.5, stop_secs=2),
         ),
     )
 
@@ -1191,7 +1236,7 @@ async def create_pipeline(
         # DebugFrameLogger("1-after-input", capture_on_speech=True, max_captures=3),
         vad,
         # DebugFrameLogger("2-after-vad", capture_on_speech=True, max_captures=3),
-        MinSpeechDurationFilter(),
+        # MinSpeechDurationFilter(),
         stt,
         HallucinationFilter(HALLUCINATION_CONFIG_PATH),
         # DebugFrameLogger("3-after-stt"),
@@ -1219,6 +1264,7 @@ async def create_pipeline(
         logger.info("🔤 PronunciationNormalizer: DISABLED (MarkdownStripper → TTS)")
 
     pipeline_steps.extend([
+        ThinkingDelayProcessor(800),  # ⏳ khoảng dừng tự nhiên trước khi bot nói
         tts,
         TTSAudioProcessor(),
         transport.output(),

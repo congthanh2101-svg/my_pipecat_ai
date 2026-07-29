@@ -1,365 +1,310 @@
-# Kế Hoạch Tích Hợp VietASR vào Pipecat AI
+# STT Providers & Thinking Delay cho FS Bot
+## Tài Liệu Kiến Trúc, Triển Khai & Hướng Dẫn Sử Dụng
+
+> **Cập nhật:** 2026-07-29  
+> **Phiên bản code:** bot_fs.py + gipformer_stt.py + vietasr_stt.py  
+> **Tác giả:** Claude Code
+
+---
 
 ## 1. Mục Tiêu
 
-Thêm tuỳ chọn STT provider: có thể chọn **Whisper** (hiện tại) hoặc **VietASR** thông qua biến môi trường `STT_PROVIDER`.
+1. Thêm tuỳ chọn STT provider: có thể chọn **Whisper**, **VietASR**, hoặc **Gipformer** thông qua `STT_PROVIDER`
+2. Thêm khoảng dừng tự nhiên trước khi bot trả lời (**ThinkingDelayProcessor**)
+3. Tăng VAD stop_secs để khách hàng có thời gian nói nhiều hơn
 
 ```
-STT_PROVIDER=whisper   # (mặc định) dùng Whisper large-v3 như hiện tại
-STT_PROVIDER=vietasr   # dùng VietASR Zipformer
+STT_PROVIDER=whisper     # (mặc định) dùng Whisper large-v3
+STT_PROVIDER=vietasr     # dùng VietASR Zipformer
+STT_PROVIDER=gipformer   # dùng Gipformer-65M-RNNT
 ```
 
 ---
 
 ## 2. Kiến Trúc Tổng Thể
 
-### 2.1. Kiến trúc hiện tại (Whisper)
-
-```
-[8kHz PCM] → VAD → MinSpeechDurationFilter → DebugWhisperSTTService → HallucinationFilter → user_agg → LLM
-                                              └── WhisperSTTService (faster-whisper)
-```
-
-### 2.2. Kiến trúc mới (thêm VietASR)
-
-```
-[8kHz PCM] → VAD → MinSpeechDurationFilter → STTSelector → HallucinationFilter → user_agg → LLM
-                                              │
-                                              ├── DebugWhisperSTTService (khi STT_PROVIDER=whisper)
-                                              │   └── faster-whisper large-v3
-                                              │
-                                              └── VietASRSTTService (khi STT_PROVIDER=vietasr)
-                                                  ├── Resample 8kHz → 16kHz
-                                                  ├── Compute FBank features (80-dim)
-                                                  └── Zipformer Transducer inference
-```
-
-### 2.3. Factory Pattern
+### 2.1. Factory Pattern (trong `create_services()`)
 
 ```python
-# Trong create_services():
 if STT_PROVIDER == "vietasr":
     stt = VietASRSTTService(...)
+elif STT_PROVIDER == "gipformer":
+    stt = GipformerSTTService(...)
 else:
     stt = DebugWhisperSTTService(...)
 ```
 
+### 2.2. Pipeline Hoàn Chỉnh
+
+```
+Input → VAD → STT → HallucinationFilter → user_agg → (RAG) → LLM
+  → MarkdownStripper → PronNorm (optional)
+  → ThinkingDelayProcessor (800ms)         ← THÊM MỚI
+  → TTS → TTSAudioProcessor → Output → assistant_agg
+```
+
+### 2.3. So Sánh Các Provider STT
+
+| Tiêu chí | Whisper (large-v3) | VietASR (Zipformer) | Gipformer-65M-RNNT |
+|----------|-------------------|---------------------|---------------------|
+| **Tham số** | ~3B | ~50M | 65M |
+| **Framework** | faster-whisper | sherpa-onnx | sherpa-onnx |
+| **API** | `WhisperSTTService` | `OfflineRecognizer.from_transducer()` | `OfflineRecognizer.from_transducer()` |
+| **Sample rate** | 8kHz → 16kHz nội bộ | 16kHz (resample) | 16kHz (resample) |
+| **Feature dim** | 80 (Mel) | 80 (FBank) | 80 (FBank) |
+| **GPU** | ✅ CUDA | ✅ CUDA | ✅ CUDA |
+| **INT8 quantized** | ❌ | ❌ | ✅ (70MB) |
+| **License** | MIT | ❓ Không rõ | MIT |
+| **Auto-download** | ❌ | ❌ | ✅ HuggingFace |
+| **Kích thước** | ~3GB | ~270MB | ~270MB / ~73MB (INT8) |
+
+Cả 3 provider dùng chung VAD (SileroVADAnalyzer) và HallucinationFilter.
+
+### 2.4. Benchmark Gipformer
+
+| Benchmark | Gipformer | Next-best |
+|-----------|-----------|-----------|
+| tele-medium (call-center) | **15.53% WER** | 19.95% |
+| tele-difficult-north | **25.10% WER** | 31.78% |
+| vivos | **4.12% WER** | 6.99% |
+| VietMed | **17.87% WER** | 22.93% |
+
 ---
 
-## 3. Các File Cần Tạo/Sửa
+## 3. File Mới: `gipformer_stt.py` (180 dòng)
 
-### File Mới
+### 3.1. Class: `GipformerSTTService`
 
-| File | Mô tả |
-|------|-------|
-| `freeswitch_agent/vietasr_stt.py` | **VietASRSTTService** — custom STT service cho Pipecat |
-| `freeswitch_agent/plans/add-vietasr-stt-option.md` | (file này) |
+Kế thừa `SegmentedSTTService` (giống VietASR), sử dụng sherpa-onnx `OfflineRecognizer.from_transducer()`.
 
-### File Cần Sửa
+**Constructor params:**
+| Param | Default | Mô tả |
+|-------|---------|-------|
+| `model_dir` | `models/gipformer/` | Thư mục chứa model files |
+| `provider` | `cuda` | `"cpu"` hoặc `"cuda"` |
+| `use_int8` | `False` | Dùng model INT8 quantized |
+| `decoding_method` | `greedy_search` | Hoặc `modified_beam_search` |
 
-| File | Thay đổi |
+**Audio flow:**
+```
+8kHz Int16 PCM (pipeline)
+  → SegmentedSTTService accumulates trong _audio_buffer
+  → VADUserStoppedSpeakingFrame trigger run_stt(accumulated_audio)
+  → Resample 8kHz→16kHz (soxr VHQ)
+  → Int16→Float32 [-1,1]
+  → sherpa-onnx OfflineRecognizer → TranscriptionFrame(text, "vi")
+```
+
+**Xử lý text output:**
+```python
+# Cả VietASR và Gipformer đều output UPPERCASE (BPE tokens)
+text = text.lower()
+text = text[0].upper() + text[1:] if len(text) > 1 else text.upper()
+```
+
+### 3.2. File Discovery
+
+Dùng `rglob(f"*encoder*")` phân biệt INT8 vs FP32 dựa trên `.int8.onnx` suffix.
+
+### 3.3. HuggingFace Auto-Download
+
+Nếu model chưa có trong `model_dir`, tự động tải từ `g-group-ai-lab/gipformer-65M-rnnt`:
+```python
+from huggingface_hub import snapshot_download
+snapshot_download("g-group-ai-lab/gipformer-65M-rnnt", local_dir=model_dir)
+```
+
+### 3.4. Model Files
+
+```
+models/gipformer/
+├── encoder-epoch-35-avg-6.onnx          # FP32 (249MB)
+├── decoder-epoch-35-avg-6.onnx          # FP32 (5.0MB)
+├── joiner-epoch-35-avg-6.onnx           # FP32 (4.0MB)
+├── encoder-epoch-35-avg-6.int8.onnx     # INT8 (68MB)
+├── decoder-epoch-35-avg-6.int8.onnx     # INT8 (1.3MB)
+├── joiner-epoch-35-avg-6.int8.onnx      # INT8 (1.0MB)
+├── tokens.txt                           # BPE vocabulary (26KB)
+├── bpe.model                            # SentencePiece model (không dùng)
+├── config.json                          # Config metadata (không dùng)
+├── epoch-35-avg-6.pt                    # PyTorch checkpoint (267MB)
+└── epoch-999.pt                         # PyTorch checkpoint (267MB)
+```
+
+---
+
+## 4. File Sửa: `bot_fs.py`
+
+| Dòng | Thay đổi |
 |------|----------|
-| `freeswitch_agent/bot_fs.py` | Thêm import + factory cho VietASR trong `create_services()`; thêm biến `STT_PROVIDER` |
-| `freeswitch_agent/bot_sdk.py` | Tương tự nếu cần hỗ trợ ở SDK path |
-| `freeswitch_agent/.env.example` | Thêm `STT_PROVIDER` |
+| 9 | Module docstring: thêm `Gipformer` |
+| 87 | `from gipformer_stt import GipformerSTTService` |
+| 238–242 | 3 env vars: `GIPFORMER_MODEL_DIR`, `GIPFORMER_USE_INT8`, `GIPFORMER_PROVIDER` |
+| 1087–1094 | Nhánh `elif STT_PROVIDER == "gipformer"` trong factory |
+| 1023–1052 | `ThinkingDelayProcessor` class (xem section 6) |
+| 1223 | VAD `stop_secs=2` (Option 1) |
+| 1262–1263 | `ThinkingDelayProcessor(800)` chèn vào pipeline |
 
----
-
-## 4. Thiết Kế VietASRSTTService
-
-### 4.1. Interface (kế thừa STTService)
-
-```python
-from pipecat.services.stt_service import STTService
-from pipecat.frames.frames import TranscriptionFrame
-
-class VietASRSTTService(STTService):
-    def __init__(self, 
-                 model_path: str,
-                 tokens_path: str,
-                 device: str = "cuda",
-                 sample_rate: int = 16000,
-                 use_streaming: bool = True):
-        ...
-    
-    async def run_stt(self, audio: bytes):
-        """
-        Audio: 8kHz Int16 PCM bytes từ pipeline
-        1. Resample 8kHz → 16kHz
-        2. Compute FBank (80-dim, 25ms window, 10ms shift)
-        3. Run Zipformer encoder → decoder → joiner
-        4. Decode BPE tokens → text
-        5. yield TranscriptionFrame
-        """
-```
-
-### 4.2. Phương án tích hợp — 3 lựa chọn
-
-#### Option A: Sherpa-ONNX (Khuyến nghị)
-
-Sử dụng [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) — đã hỗ trợ Zipformer, không cần k2/kaldifeat.
-
-**Ưu điểm:**
-- Không cần cài k2, kaldifeat, icefall (dependencies nặng)
-- Có sẵn Python binding: `pip install sherpa-onnx`
-- Hỗ trợ CPU + CUDA
-- Có sẵn pipeline streaming (OnlineRecognizer)
-- Đã hỗ trợ model Zipformer
-
-**Code mẫu:**
-```python
-import sherpa_onnx
-import numpy as np
-
-class VietASRSTTService(STTService):
-    def __init__(self, tokens_path, encoder_path, decoder_path, joiner_path):
-        self.recognizer = sherpa_onnx.OnlineRecognizer(
-            tokens=tokens_path,
-            encoder=encoder_path,
-            decoder=decoder_path,
-            joiner=joiner_path,
-            sample_rate=16000,
-            feature_dim=80,
-            decoding_method="greedy_search",
-            provider="cuda",  # hoặc "cpu"
-        )
-        self.stream = self.recognizer.create_stream()
-    
-    async def run_stt(self, audio: bytes):
-        # Resample 8kHz → 16kHz
-        audio_16k = self._resample(audio, 8000, 16000)
-        
-        # Push to recognizer
-        samples = np.frombuffer(audio_16k, dtype=np.int16).astype(np.float32) / 32768.0
-        self.stream.accept_waveform(sample_rate=16000, waveform=samples)
-        
-        # Flush để nhận kết quả cuối
-        self.stream.input_finished()
-        
-        # Get result
-        text = self.recognizer.decode_stream(self.stream)
-        if text.strip():
-            yield TranscriptionFrame(text, self._user_id, timestamp, language="vi")
-```
-
-**Nhược điểm:** Cần convert VietASR checkpoint sang ONNX format mà sherpa-onnx hiểu. Format của sherpa-onnx Zipformer cần:
-- `encoder.onnx` (Zipformer encoder)
-- `decoder.onnx` (embedding decoder)  
-- `joiner.onnx` (joiner network)
-- `tokens.txt` (BPE vocabulary)
-
-Phải dùng `export.py` của VietASR/icefall để export ONNX, hoặc dùng script `sherpa-onnx/scripts/export-zipformer-onnx.py`.
-
-#### Option B: PyTorch trực tiếp (dùng checkpoint .pt)
-
-Load checkpoint `.pt` từ VietASR, chạy inference bằng PyTorch + kaldifeat.
-
-**Ưu điểm:**
-- Dùng đúng model gốc, không cần convert
-- Có thể dùng JIT script để tối ưu
-
-**Nhược điểm:**
-- Cần cài toàn bộ stack: `pip install k2 kaldifeat icefall sentencepiece`
-- `k2` khó cài, dễ conflict
-- Không production-friendly
-
-#### Option C: Server riêng (microservice)
-
-Chạy VietASR như một service riêng (FastAPI/gRPC), bot gọi qua HTTP.
-
-**Ưu điểm:**
-- Tách biệt dependencies
-- Có thể scale riêng
-- Không ảnh hưởng đến bot hiện tại
-
-**Nhược điểm:**
-- Thêm network latency
-- Phức tạp hơn trong triển khai
-
----
-
-## 5. Vấn Đề Sample Rate (QUAN TRỌNG)
-
-### 5.1. Hiện tại
-
-| Component | Sample Rate |
-|-----------|-------------|
-| FreeSWITCH audio | 8 kHz |
-| WebSocket transport | 8 kHz |
-| VAD (Silero) | 8 kHz |
-| Whisper input | 8 kHz → internal 16 kHz |
-| **VietASR yêu cầu** | **16 kHz** |
-
-### 5.2. Giải pháp cho VietASR
-
-**Cách 1 (nhanh): Resample trong STT service** — 8kHz → 16kHz trước khi đưa vào VietASR
+### Env Vars Added
 
 ```python
-import soxr
-
-audio_16k = soxr.resample(audio_8k_np, 8000, 16000)
+GIPFORMER_MODEL_DIR  = os.getenv("GIPFORMER_MODEL_DIR", str(Path(__file__).parent / "models" / "gipformer"))
+GIPFORMER_USE_INT8   = os.getenv("GIPFORMER_USE_INT8", "false").lower() == "true"
+GIPFORMER_PROVIDER   = os.getenv("GIPFORMER_PROVIDER", "cuda")
 ```
-- Dễ implement, không ảnh hưởng đến pipeline khác
-- **Nhược điểm:** Upsampling 8kHz → 16kHz không thêm được thông tin tần số > 4kHz, làm giảm lợi thế của VietASR
-
-**Cách 2 (triệt để): Chuyển pipeline lên 16kHz**
-
-Cần sửa:
-- `ai_call_handler.lua`: `SAMPLE_RATE = "16000"` thay vì "8000"
-- `mod_audio_stream_pipecat`: `build_audio_raw_frame()` từ 8000→16000
-- `bot_fs.py`: `audio_in_sample_rate=16000`, `audio_out_sample_rate=8000` hoặc 16000
-- `TTSAudioProcessor`: output sample rate
-- `L16FrameSerializer`: sample rate mặc định
-
-**Khuyến nghị:** Làm cách 1 trước (resample trong STT), sau đó upgrade lên cách 2 nếu cần thêm chất lượng.
 
 ---
 
-## 6. Các Bước Triển Khai Chi Tiết
+## 5. Option 1: VAD stop_secs
 
-### Phase 1: Chuẩn bị (1-2 ngày)
+**Mục đích:** Tăng khoảng lặng VAD chờ trước khi kết luận "user stopped speaking", cho khách hàng thời gian nói tiếp.
 
-- [ ] Verify pretrained model trên HuggingFace: `zzasdf/viet_iter3_pseudo_label`
-- [ ] Nếu không có checkpoint, liên hệ tác giả hoặc tìm model thay thế
-- [ ] Export checkpoint sang ONNX format sherpa-onnx
-- [ ] Kiểm thử inference với sherpa-onnx standalone
+**Sửa tại `bot_fs.py` dòng 1223:**
+```python
+# Trước:
+params=VADParams(confidence=0.85, min_volume=0.5)
 
-### Phase 2: Tích hợp core (2-3 ngày)
-
-- [ ] Tạo `vietasr_stt.py` với `VietASRSTTService`
-- [ ] Thêm factory trong `bot_fs.py` (`create_services`)
-- [ ] Xử lý resample 8kHz → 16kHz
-- [ ] Kiểm thử với /transcribe endpoint (upload file)
-- [ ] Kiểm thử với /audio-stream (SIP call)
-
-### Phase 3: Streaming (2-3 ngày)
-
-- [ ] Implement streaming chunk-by-chunk (không cần đợi VAD stop)
-- [ ] State management cho Zipformer streaming states
-- [ ] Tối ưu latency
-
-### Phase 4: Fine-tune (1-2 ngày)
-
-- [ ] Điều chỉnh `no_speech_prob` / confidence threshold cho VietASR
-- [ ] Cập nhật hallucination filter
-- [ ] Tune VAD params (có thể khác với Whisper)
-- [ ] Benchmark WER so với Whisper
+# Sau:
+params=VADParams(confidence=0.85, min_volume=0.5, stop_secs=2)
+```
+→ Khách có thể ngừng ~2 giây trước khi bot can thiệp.
 
 ---
 
-## 7. Dependencies
+## 6. Option 2: ThinkingDelayProcessor
 
-### Cần cài đặt
+### 6.1. Class (bot_fs.py dòng 1023–1052)
+
+```python
+class ThinkingDelayProcessor(FrameProcessor):
+    """Chèn delay trước TTSStartedFrame đầu tiên để bot có cảm giác đang 'suy nghĩ'."""
+
+    def __init__(self, delay_ms: float = 800):
+        super().__init__()
+        self._delay_s = delay_ms / 1000.0
+        self._pending = True
+
+    async def process_frame(self, frame, direction):
+        if direction == FrameDirection.DOWNSTREAM:
+            if isinstance(frame, TTSStartedFrame):
+                if self._pending:
+                    logger.info(f"⏳ Thinking delay {self._delay_s*1000:.0f}ms...")
+                    await asyncio.sleep(self._delay_s)
+                    self._pending = False
+            elif isinstance(frame, TTSStoppedFrame):
+                self._pending = True
+        await super().process_frame(frame, direction)
+        await self.push_frame(frame, direction)  # bắt buộc: forward frame
+```
+
+### 6.2. Vị trí trong pipeline (dòng 1262–1263)
+
+```python
+pipeline_steps.extend([
+    ThinkingDelayProcessor(800),  # ⏳ khoảng dừng tự nhiên trước khi bot nói
+    tts,
+    ...
+])
+```
+
+### 6.3. Bug Fix Log
+
+| Lần | Code | Lỗi | Nguyên nhân |
+|-----|------|-----|-------------|
+| 1 | `self.push_frame(frame)` | `"StartFrame not received yet"` | Bỏ qua `super().process_frame()` → không set `__started` |
+| 2 | `super().process_frame()` (thiếu push) | `"CancelFrame timeout"` sau 5s | StartFrame/CancelFrame bị nuốt, không push xuống TTS |
+| 3 ✅ | `super().process_frame()` + `self.push_frame()` | **Hoạt động ổn định** | Đúng pattern: super xử lý state, push_frame forward tiếp |
+
+**Root cause:** Trong Pipecat 1.5.0, `FrameProcessor.process_frame()` xử lý `StartFrame` (set `__started=True`) và `CancelFrame` (set `_cancelling=True`) nhưng **không tự động push frame xuống processor tiếp theo**. Pattern đúng là:
+
+```python
+async def process_frame(self, frame, direction):
+    # Custom logic (delay, filter, ...)
+    await super().process_frame(frame, direction)  # state management
+    await self.push_frame(frame, direction)        # forward to next processor
+```
+
+---
+
+## 7. Các File Không Cần Sửa
+
+- `vietasr_stt.py` — giữ nguyên
+- `bot_sdk.py` — không ảnh hưởng
+- `l16_serializer.py` — không ảnh hưởng
+- `.gitignore` — đã có `models/`
+
+---
+
+## 8. Dependencies
+
+### Đã cài thêm
 
 ```bash
-# Option A (khuyến nghị) - sherpa-onnx
-pip install sherpa-onnx
-
-# Option B - PyTorch stack
-pip install k2 kaldifeat icefall sentencepiece torch torchaudio
+pip install huggingface_hub    # auto-download Gipformer model
 ```
 
-### Tác động đến dependencies hiện tại
+### Dependencies hiện tại
 
-- `sherpa-onnx` có thể conflict với `torch` version hiện tại
-- Kiểm tra trong `.venv` trước khi cài
+| Package | Dùng cho |
+|---------|----------|
+| `sherpa-onnx` | VietASR + Gipformer inference |
+| `soxr` | Resample 8kHz→16kHz |
+| `numpy` | Audio buffer xử lý |
+| `onnxruntime-gpu` | GPU execution provider |
+| `soundfile` | Đọc WAV (transcribe endpoint) |
+| `huggingface_hub` | Auto-download Gipformer model |
 
 ---
 
-## 8. Quản Lý Model
+## 9. Hướng Dẫn Sử Dụng
 
-### Model files cần có
+### 9.1. Chạy các chế độ STT
 
+```bash
+# Whisper (mặc định)
+python bot_fs.py
+
+# VietASR
+STT_PROVIDER=vietasr python bot_fs.py
+
+# Gipformer FP32
+STT_PROVIDER=gipformer python bot_fs.py
+
+# Gipformer INT8 (nhanh hơn, model 70MB encoder)
+STT_PROVIDER=gipformer GIPFORMER_USE_INT8=true python bot_fs.py
+
+# Gipformer CPU (fallback nếu không có GPU)
+STT_PROVIDER=gipformer GIPFORMER_PROVIDER=cpu python bot_fs.py
 ```
-models/vietasr/
-├── encoder.onnx         # Zipformer encoder (ONNX)
-├── decoder.onnx         # Embedding decoder (ONNX)  
-├── joiner.onnx          # Joiner network (ONNX)
-└── tokens.txt           # BPE vocabulary
-```
 
-Hoặc nếu dùng PyTorch:
-```
-models/vietasr/
-├── pretrained.pt        # Checkpoint (state_dict hoặc JIT)
-├── tokens.txt           # BPE vocabulary
-└── bpe.model            # SentencePiece model
-```
-
----
-
-## 9. Thay Đổi Trong bot_fs.py
-
-### Thêm biến môi trường
+### 9.2. Tuỳ chỉnh thời gian
 
 ```python
-# Sau dòng LLM_PROVIDER:
-STT_PROVIDER = os.getenv("STT_PROVIDER", "whisper").lower()
-VIETASR_MODEL_DIR = os.getenv("VIETASR_MODEL_DIR", str(Path(__file__).parent / "models" / "vietasr"))
+# ThinkingDelayProcessor(delay_ms): 500ms → 0.5 giây, 1200ms → 1.2 giây
+ThinkingDelayProcessor(500),
+
+# VAD stop_secs: thời gian chờ sau khi khách ngừng nói
+params=VADParams(confidence=0.85, min_volume=0.5, stop_secs=1.5)
 ```
 
-### Sửa create_services() — factory pattern
+### 9.3. Timing tổng thể
 
-```python
-def create_services() -> tuple:
-    # ... load_whisper_model() vẫn chạy nếu dùng Whisper
-    
-    if STT_PROVIDER == "vietasr":
-        from vietasr_stt import VietASRSTTService
-        stt = VietASRSTTService(
-            model_path=VIETASR_MODEL_DIR,
-            device=os.getenv("WHISPER_DEVICE", "cuda"),  # reuse env var
-            use_streaming=True,
-        )
-    else:
-        stt = DebugWhisperSTTService(...)  # như hiện tại
-    
-    # Phần còn lại giữ nguyên
+```
+Khách ngừng nói → VAD stop_secs=2s → user stopped
+  → STT decode (~50ms) → LLM generate (~200-500ms)
+  → ThinkingDelay 800ms → TTS bắt đầu đọc
+─────────────────────────────────────────────────
+Tổng delay ~3s từ lúc khách ngừng nói → bot trả lời
 ```
 
 ---
 
-## 10. So Sánh Chi Phí & Lợi Ích
-
-### Khi Whisper (nguyên trạng)
-- ✅ Hoạt động ổn định
-- ✅ Nhiều tài liệu, dễ debug
-- ❌ Nhận diện tiếng Việt qua SIP/PCMA rất kém
-- ❌ Streaming không support (phải đợi hết câu)
-- ❌ Model 3B tham số → tốn GPU
-
-### Khi thêm VietASR
-- ✅ Model nhẹ (~50M), có thể chạy CPU real-time
-- ✅ Streaming native (chunk-by-chunk)
-- ✅ Train riêng cho tiếng Việt (70k giờ)
-- ✅ Kỳ vọng tốt hơn với audio codec quality thấp
-- ⚠️ Chất lượng trên clean audio cần kiểm tra
-- ⚠️ Cần export ONNX model (chưa có public)
-- ❌ Dependency phức tạp hơn
-
----
-
-## 11. Rủi Ro & Mitigation
+## 10. Rủi Ro & Mitigation
 
 | Rủi ro | Mitigation |
-|---------|------------|
-| Không có pretrained model ONNX | Dùng PyTorch JIT thay vì ONNX |
-| sherpa-onnx không support Zipformer | Dùng PyTorch inference trực tiếp |
-| Chất lượng VietASR không như kỳ vọng | Giữ song song Whisper, so sánh A/B |
-| Resample 8kHz→16kHz giảm chất lượng | Nâng pipeline lên 16kHz ở phase sau |
-| K2/kaldifeat khó cài | Dùng sherpa-onnx (không cần 2 thư viện này) |
-
----
-
-## 12. Kết Luận
-
-**Khả thi:** ✅ Có thể tích hợp, ưu tiên dùng **sherpa-onnx** (Option A).
-
-**Lộ trình khuyến nghị:**
-1. Kiểm tra HF checkpoint → nếu không có, tìm model Zipformer tiếng Việt khác (hoặc tự train)
-2. Export ONNX → kiểm thử standalone với sherpa-onnx
-3. Viết `VietASRSTTService` → tích hợp vào bot_fs.py
-4. Kiểm thử với SIP phone, so sánh WER với Whisper
-5. Nếu quality tốt hơn rõ rệt → đặt làm mặc định cho FS path
-
-**Luôn giữ Whisper làm fallback** — dùng `STT_PROVIDER` để chuyển đổi linh hoạt.
+|--------|------------|
+| Gipformer quality không tốt | Giữ song song 3 provider, so sánh A/B |
+| INT8 quantized giảm accuracy | FP32 làm mặc định, INT8 là option |
+| huggingface_hub network timeout | Cache model local, tự động fallback |
+| Pipeline frame bị nuốt (processor bug) | Pattern: `super()` + `push_frame()` cùng nhau |
+| Thinking delay làm người dùng sốt ruột | Config 500ms thay vì 800ms |
