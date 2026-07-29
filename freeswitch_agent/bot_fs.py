@@ -6,7 +6,7 @@ Rewrite based on pipecat-examples/websocket pattern:
 - WorkerRunner lifecycle (instead of manual TaskManager)
 - worker.rtvi.event_handler("on_client_ready") for RTVI greetingPiperVoice
 
-STT: Whisper (medium, auto-language) | LLM: Ollama/Deepseek | TTS: Piper/OmniVoice
+STT: Whisper (large-v3) / VietASR (Zipformer) | LLM: Ollama/Deepseek | TTS: Piper/OmniVoice
 
 Endpoints:
   /audio-stream   → L16 PCM (FreeSWITCH mod_audio_stream / browser)
@@ -83,6 +83,7 @@ from hallucination_filter import HallucinationFilter
 
 from pronunciation_normalizer import PronunciationNormalizer
 from omnivoice_tts import OmniVoiceTTSService
+from vietasr_stt import VietASRSTTService
 from call_logger import CallLogger, extract_conversation
 from knowledge_base import KnowledgeBase, get_knowledge_base
 from rag_processor import RAGProcessor
@@ -232,6 +233,11 @@ load_dotenv(override=True)
 # Config
 # ---------------------------------------------------------------------------
 VOICES_DIR = Path(os.getenv("PIPER_VOICES_DIR", "/opt/ollama-playground/local-voice-agent/voices"))
+
+# STT Provider: "whisper" (mặc định) hoặc "vietasr"
+STT_PROVIDER = os.getenv("STT_PROVIDER", "whisper").lower()
+VIETASR_MODEL_DIR = os.getenv("VIETASR_MODEL_DIR", str(Path(__file__).parent / "models" / "vietasr"))
+VIETASR_PROVIDER = os.getenv("VIETASR_PROVIDER", "cuda")
 
 # LLM Provider: "ollama" (local) hoặc "deepseek" (API cloud)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
@@ -1066,22 +1072,26 @@ def create_services() -> tuple:
             return None, None, None
         load_piper_voice()
 
-    # STT: per-pipeline instance, inject shared model to avoid re-loading
-    stt = DebugWhisperSTTService(
-        device=os.getenv("WHISPER_DEVICE", "cuda"),
-        compute_type=os.getenv("WHISPER_COMPUTE_TYPE", "float16"),
-        settings=WhisperSTTService.Settings(
-            model=Model.LARGE,
-            language=Language.VI,  # cố định tiếng Việt — audio giờ đã rõ hơn nhờ AGC,
-            # auto-detect (None) dễ đoán nhầm sang tiếng Anh trên audio nhiễu → hallucination
-            no_speech_prob=0.9,  # 0.6 quá thấp — segment giọng nói THẬT đo được no_speech_prob~0.82
-            # temperature=0.0,   # Ko có
-            # logprob_threshold=-0.05,  # Ko có
-            # compression_ratio_threshold=1.85,  Ko có
-            # (xem log 🎤), phải để ngưỡng cao hơn giá trị đó mới không loại nhầm
-        ),
-    )
-    stt._model = _shared_whisper_model  # Use shared model → no GPU OOM
+    # STT: lua chon provider (whisper mac dinh, vietasr cho tieng Viet)
+    if STT_PROVIDER == "vietasr":
+        stt = VietASRSTTService(
+            model_dir=VIETASR_MODEL_DIR,
+            provider=VIETASR_PROVIDER,
+            decoding_method="greedy_search",
+        )
+        logger.info(f"VN STT: VietASR (model_dir={VIETASR_MODEL_DIR}, provider={VIETASR_PROVIDER})")
+    else:
+        stt = DebugWhisperSTTService(
+            device=os.getenv("WHISPER_DEVICE", "cuda"),
+            compute_type=os.getenv("WHISPER_COMPUTE_TYPE", "float16"),
+            settings=WhisperSTTService.Settings(
+                model=Model.LARGE,
+                language=Language.VI,  # cố định tiếng Việt - audio giờ đã rõ hơn nhờ AGC,
+                # auto-detect (None) de doan nham sang tieng Anh tren audio nhieu -> hallucination
+                no_speech_prob=0.9,  # 0.6 qua thap - segment giong noi THAT do duoc no_speech_prob~0.82
+            ),
+        )
+        stt._model = _shared_whisper_model
 
     # LLM: tuỳ chọn provider (ollama local hoặc deepseek API)
     if LLM_PROVIDER == "deepseek":
