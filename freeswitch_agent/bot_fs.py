@@ -88,6 +88,7 @@ from gipformer_stt import GipformerSTTService
 from call_logger import CallLogger, extract_conversation
 from knowledge_base import KnowledgeBase, get_knowledge_base
 from rag_processor import RAGProcessor
+from fs_tools import create_transfer_tool, cleanup_http_client
 
 import logging
 
@@ -261,6 +262,12 @@ OMNIVOICE_VOICE_PROFILE = os.getenv("OMNIVOICE_VOICE_PROFILE", str(Path(__file__
 OMNIVOICE_MODEL = os.getenv("OMNIVOICE_MODEL", "k2-fsa/OmniVoice")
 OMNIVOICE_NUM_STEP = int(os.getenv("OMNIVOICE_NUM_STEP", "32"))
 
+# FreeSWITCH Rest API — dùng cho tool calling (chuyển cuộc gọi đến queue tổng đài)
+FS_API_BASE_URL = os.getenv("FS_API_BASE_URL", "http://192.168.1.153:8443/api/v1")
+FS_API_USERNAME = os.getenv("FS_API_USERNAME", "admin")
+FS_API_PASSWORD = os.getenv("FS_API_PASSWORD", "Winter2024$")
+FS_API_QUEUE = os.getenv("FS_API_QUEUE", "support@default")
+
 SYSTEM_PROMPT = (
     "Bạn là trợ lý giọng nói tiếng Việt thân thiện, hữu ích.\n\n"
     "Quy tắc:\n"
@@ -270,7 +277,12 @@ SYSTEM_PROMPT = (
     "- Ví dụ viết ĐÚNG: 'Tôi là Xon Len' — KHÔNG viết 'TôilàXonLen'.\n"
     "- TUYỆT ĐỐI KHÔNG được dùng markdown, ký tự đặc biệt, dấu sao ** **, dấu gạch * *, dấu `, dấu #, emoji, hay bất kỳ định dạng nào. \n"
     "- Chỉ trả lời bằng chữ thuần tuý, không có ký hiệu định dạng.\n"
-    "- Trả lời bằng tiếng Việt\n"
+    "- Trả lời bằng tiếng Việt.\n"
+    "- Khi khách hàng yêu cầu gặp nhân viên hỗ trợ / tổng đài viên / tư vấn viên / "
+    "gặp người thật / chuyển máy cho điện thoại viên, "
+    "hãy gọi hàm transfer_to_agent để chuyển cuộc gọi đến nhân viên tổng đài.\n"
+    "- Sau khi gọi transfer_to_agent, hãy nói với khách hàng rằng "
+    "cuộc gọi đang được chuyển và cảm ơn họ đã sử dụng dịch vụ.\n"
 )
 
 # RAG (Retrieval-Augmented Generation) — kiến thức nội bộ
@@ -1214,6 +1226,8 @@ async def create_pipeline(
     llm: OLLamaLLMService,
     tts: PiperTTSService,
     knowledge_base: KnowledgeBase | None = None,
+    call_uuid: str = "",
+    fs_api_config: dict | None = None,
 ) -> tuple[PipelineWorker, LLMContext]:
     """Create a Pipecat pipeline using SileroVADAnalyzer (standard pattern).
 
@@ -1221,11 +1235,28 @@ async def create_pipeline(
     instead of Gemini. Uses WorkerRunner for lifecycle management instead of
     direct PipelineWorker.run().
 
+    Args:
+        call_uuid: UUID của cuộc gọi (từ query params) — dùng cho tool calling.
+        fs_api_config: Config cho FS REST API (base_url, username, password, queue).
+
     Returns:
         Tuple of (PipelineWorker, LLMContext). Each WebSocket path adds its
         own greeting handler before passing to WorkerRunner.
     """
-    context = LLMContext()
+    # Register transfer tool if call_uuid is available
+    transfer_handler = None
+    if call_uuid and fs_api_config:
+        logger.info(f"🔧 Registering transfer tool (queue={fs_api_config.get('queue')})")
+        transfer_handler = create_transfer_tool(
+            call_uuid=call_uuid,
+            api_base_url=fs_api_config["base_url"],
+            api_username=fs_api_config["username"],
+            api_password=fs_api_config["password"],
+            queue_name=fs_api_config.get("queue", "support@default"),
+        )
+        context = LLMContext(tools=[transfer_handler])
+    else:
+        context = LLMContext()
 
     # VAD phải chạy TRƯỚC stt để sinh UserStartedSpeakingFrame /
     # UserStoppedSpeakingFrame — WhisperSTTService (batch, non-streaming)
@@ -1399,7 +1430,18 @@ async def rtvi_websocket(ws: WebSocket):
             await ws.close(code=1011)
             return
 
-        worker, context = await create_pipeline(transport, stt, llm, tts, knowledge_base=_knowledge_base)
+        fs_api_config = {
+            "base_url": FS_API_BASE_URL,
+            "username": FS_API_USERNAME,
+            "password": FS_API_PASSWORD,
+            "queue": FS_API_QUEUE,
+        }
+        worker, context = await create_pipeline(
+            transport, stt, llm, tts,
+            knowledge_base=_knowledge_base,
+            call_uuid=conversation_id,
+            fs_api_config=fs_api_config,
+        )
 
         # RTVI greeting (fires after RTVI handshake completes)
         @worker.rtvi.event_handler("on_client_ready")
@@ -1521,7 +1563,18 @@ async def audio_stream(ws: WebSocket):
             await ws.close(code=1011)
             return
 
-        worker, context = await create_pipeline(transport, stt, llm, tts, knowledge_base=_knowledge_base)
+        fs_api_config = {
+            "base_url": FS_API_BASE_URL,
+            "username": FS_API_USERNAME,
+            "password": FS_API_PASSWORD,
+            "queue": FS_API_QUEUE,
+        }
+        worker, context = await create_pipeline(
+            transport, stt, llm, tts,
+            knowledge_base=_knowledge_base,
+            call_uuid=conversation_id,
+            fs_api_config=fs_api_config,
+        )
 
         # L16 greeting (fires on transport connect)
         @transport.event_handler("on_client_connected")
