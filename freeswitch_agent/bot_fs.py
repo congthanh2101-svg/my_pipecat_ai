@@ -245,6 +245,8 @@ GIPFORMER_PROVIDER = os.getenv("GIPFORMER_PROVIDER", "cuda")
 
 # LLM Provider: "ollama" (local) hoặc "deepseek" (API cloud)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
+OLLAMA_EXTRA = os.getenv("OLLAMA_EXTRA", '{"extra_body": {"options": {"think": false}}}')
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
@@ -263,16 +265,12 @@ SYSTEM_PROMPT = (
     "Bạn là trợ lý giọng nói tiếng Việt thân thiện, hữu ích.\n\n"
     "Quy tắc:\n"
     "- Bạn tên là Xon Len hay còn gọi là Xen Long, trợ lý giọng nói thân thiện.\n"
-    "- Trả lời NGẮN GỌN, tối đa 1-2 câu\n"
-    "- LUÔN LUÔN có khoảng trắng giữa các từ. "
-    "Ví dụ viết ĐÚNG: 'Tôi là Xon Len' — KHÔNG viết 'TôilàXonLen'.\n"
-    "- TUYỆT ĐỐI KHÔNG được dùng markdown, ký tự đặc biệt, dấu sao ** **, "
-    "dấu gạch * *, dấu `, dấu #, emoji, hay bất kỳ định dạng nào. "
-    "Chỉ trả lời bằng chữ thuần tuý, không có ký hiệu định dạng.\n"
+    "- Trả lời NGẮN GỌN, tối đa 5-50 câu.\n"
+    "- LUÔN LUÔN có khoảng trắng giữa các từ và cuối câu phải có dấu chấm, dấu hỏi, dấu phẩy hoặc dấu chấm than.\n"
+    "- Ví dụ viết ĐÚNG: 'Tôi là Xon Len' — KHÔNG viết 'TôilàXonLen'.\n"
+    "- TUYỆT ĐỐI KHÔNG được dùng markdown, ký tự đặc biệt, dấu sao ** **, dấu gạch * *, dấu `, dấu #, emoji, hay bất kỳ định dạng nào. \n"
+    "- Chỉ trả lời bằng chữ thuần tuý, không có ký hiệu định dạng.\n"
     "- Trả lời bằng tiếng Việt\n"
-    "- Nếu câu hỏi không rõ ràng, vô nghĩa, hoặc bạn không chắc chắn, "
-    "hãy nói 'Dạ, em chưa nghe rõ, anh/chị nói lại được không ạ!'\n"
-    "- KHÔNG BAO GIỜ tự bịa ra câu trả lời. Nếu không biết, hãy nói không biết."
 )
 
 # RAG (Retrieval-Augmented Generation) — kiến thức nội bộ
@@ -1021,11 +1019,19 @@ class RTVICompatibleSerializer(ProtobufFrameSerializer):
 # ThinkingDelayProcessor — thêm khoảng dừng tự nhiên trước khi bot trả lời
 # ---------------------------------------------------------------------------
 class ThinkingDelayProcessor(FrameProcessor):
-    """Chèn delay trước TTSStartedFrame đầu tiên để bot có cảm giác đang 'suy nghĩ'.
+    """Chèn delay sau TTS: delay TTSStartedFrame đầu tiên mỗi lượt bot nói.
 
-    Đặt giữa LLM (hoặc MarkdownStripper) và TTS trong pipeline.
-    Delay chỉ áp dụng cho TTSStartedFrame đầu tiên sau mỗi TTSStoppedFrame
-    (tức đầu mỗi lượt bot nói, không delay giữa các câu trong cùng một lượt).
+    Đặt GIỮA TTS và TTSAudioProcessor trong pipeline.
+    Khi TTSStartedFrame chảy qua, processor ngủ `delay_ms` rồi mới forward
+    xuống TTSAudioProcessor → audio output.
+    TTSStoppedFrame reset cờ để lượt nói sau cũng được delay.
+
+    Lưu ý (Pipecat 1.5.0):
+      - Phải đặt SAU TTS để nhận được cả TTSStartedFrame và TTSStoppedFrame
+        mà TTS push ra.
+      - Phải gọi cả super().process_frame() (xử lý state) và
+        push_frame() (forward frame), nếu thiếu push_frame thì CancelFrame
+        bị nuốt -> pipeline timeout.
     """
 
     def __init__(self, delay_ms: float = 800):
@@ -1034,18 +1040,14 @@ class ThinkingDelayProcessor(FrameProcessor):
         self._pending = True  # delay lần TTSStarted đầu tiên sau mỗi TTSStopped
 
     async def process_frame(self, frame, direction):
-        # Xử lý delay TRƯỚC khi gọi super, để super push frame đi sau khi đã delay
         if direction == FrameDirection.DOWNSTREAM:
-            if isinstance(frame, TTSStartedFrame):
-                if self._pending:
-                    logger.info(f"⏳ Thinking delay {self._delay_s*1000:.0f}ms...")
-                    await asyncio.sleep(self._delay_s)
-                    self._pending = False
+            if isinstance(frame, TTSStartedFrame) and self._pending:
+                logger.info(f"⏳ Thinking delay {self._delay_s*1000:.0f}ms...")
+                await asyncio.sleep(self._delay_s)
+                self._pending = False
             elif isinstance(frame, TTSStoppedFrame):
-                self._pending = True  # reset cho lần nói tiếp theo
-        # super xử lý state (StartFrame→__start, CancelFrame→__cancel, ...)
+                self._pending = True  # reset cho lượt nói tiếp theo
         await super().process_frame(frame, direction)
-        # push tiếp frame xuống processor sau trong pipeline
         await self.push_frame(frame, direction)
 
 
@@ -1091,8 +1093,10 @@ def load_piper_voice() -> "PiperVoice":
 def create_services() -> tuple:
     """Create per-pipeline service instances sharing GPU model weights."""
 
-    # Pre-load shared Whisper model (cả Piper và OmniVoice đều cần)
-    load_whisper_model()
+    # Chỉ load Whisper nếu dùng Whisper STT — tránh tốn VRAM khi dùng
+    # VietASR hoặc Gipformer (vốn chỉ cần onnx runtime nhẹ hơn nhiều)
+    if STT_PROVIDER == "whisper":
+        load_whisper_model()
 
     if TTS_ENGINE == "omnivoice":
         # Không cần load Piper voice — OmniVoice load model riêng
@@ -1158,14 +1162,24 @@ def create_services() -> tuple:
         logger.info(f"🤖 LLM: Deepseek ({DEEPSEEK_MODEL}) @ {DEEPSEEK_BASE_URL}")
     else:
         # Ollama local (mặc định)
+        try:
+            _ollama_extra = json.loads(OLLAMA_EXTRA) if OLLAMA_EXTRA else {}
+        except (json.JSONDecodeError, TypeError):
+            _ollama_extra = {}
+            logger.warning(f"⚠️ OLLAMA_EXTRA parse error, using empty: {OLLAMA_EXTRA}")
         llm = OLLamaLLMService(
             base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
             settings=OLLamaLLMService.Settings(
-                model=os.getenv("OLLAMA_MODEL", "llama3.2:latest"),
+                model=OLLAMA_MODEL,
                 system_instruction=SYSTEM_PROMPT,
-                temperature=0.0,
-                max_tokens=256,
+                temperature=1.0,
+                max_tokens=10024,
+                top_p=0.95,
+                top_k=64,
+                extra=_ollama_extra,
             ),
+            retry_timeout_secs=30.0,     # ⬅️ thêm: chờ tối đa 60s cho LLM generate
+            retry_on_timeout=True,       # ⬅️ thêm: retry nếu timeout
         )
 
     # TTS: tuỳ chọn engine (piper mặc định, omnivoice chất lượng cao)
@@ -1264,8 +1278,8 @@ async def create_pipeline(
         logger.info("🔤 PronunciationNormalizer: DISABLED (MarkdownStripper → TTS)")
 
     pipeline_steps.extend([
-        ThinkingDelayProcessor(800),  # ⏳ khoảng dừng tự nhiên trước khi bot nói
         tts,
+        ThinkingDelayProcessor(800),  # ⏳ khoảng dừng tự nhiên SAU TTS, trước audio out
         TTSAudioProcessor(),
         transport.output(),
         assistant_agg,
@@ -1792,13 +1806,15 @@ async def transcribe_audio(file: UploadFile = File(...)):
             api_key="ollama",
         )
         llm_resp = client.chat.completions.create(
-            model=os.getenv("OLLAMA_MODEL", "llama3.2:latest"),
+            model=os.getenv("OLLAMA_MODEL", "llama3.2:3b"),
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": text},
             ],
-            max_tokens=256,
-            temperature=0.0,	# Old 0.7, temperature=0.0 (thêm vào gọi Whisper)  Ít sáng tạo hơn, chỉ nhận diện khi thực sự chắc chắn
+            max_tokens=10024,
+            temperature=1.0,	# Old 0.7, temperature=0.0 (thêm vào gọi Whisper)  Ít sáng tạo hơn, chỉ nhận diện khi thực sự chắc chắn
+            top_p=0.95,
+            top_k=64,
         )
         response_text = llm_resp.choices[0].message.content.strip()
         llm_time = time.monotonic() - llm_start

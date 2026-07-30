@@ -38,9 +38,9 @@ else:
 
 ```
 Input → VAD → STT → HallucinationFilter → user_agg → (RAG) → LLM
-  → MarkdownStripper → PronNorm (optional)
-  → ThinkingDelayProcessor (800ms)         ← THÊM MỚI
-  → TTS → TTSAudioProcessor → Output → assistant_agg
+  → MarkdownStripper → PronNorm (optional) → TTS
+  → ⏳ ThinkingDelayProcessor (800ms)         ← giữa TTS và audio output
+  → TTSAudioProcessor → Output → assistant_agg
 ```
 
 ### 2.3. So Sánh Các Provider STT
@@ -140,10 +140,10 @@ models/gipformer/
 | 9 | Module docstring: thêm `Gipformer` |
 | 87 | `from gipformer_stt import GipformerSTTService` |
 | 238–242 | 3 env vars: `GIPFORMER_MODEL_DIR`, `GIPFORMER_USE_INT8`, `GIPFORMER_PROVIDER` |
-| 1087–1094 | Nhánh `elif STT_PROVIDER == "gipformer"` trong factory |
-| 1023–1052 | `ThinkingDelayProcessor` class (xem section 6) |
+| 1023–1053 | `ThinkingDelayProcessor` class (section 6) |
+| 1088–1095 | Nhánh `elif STT_PROVIDER == "gipformer"` trong factory |
 | 1223 | VAD `stop_secs=2` (Option 1) |
-| 1262–1263 | `ThinkingDelayProcessor(800)` chèn vào pipeline |
+| 1270–1272 | `ThinkingDelayProcessor(800)` chèn vào pipeline **sau TTS, trước TTSAudioProcessor** |
 
 ### Env Vars Added
 
@@ -173,56 +173,118 @@ params=VADParams(confidence=0.85, min_volume=0.5, stop_secs=2)
 
 ## 6. Option 2: ThinkingDelayProcessor
 
-### 6.1. Class (bot_fs.py dòng 1023–1052)
+### 6.1. Mục đích
+
+Thêm khoảng dừng ~800ms trước khi bot bắt đầu nói, tạo cảm giác bot đang "suy nghĩ" thay vì trả lời ngay lập tức. Chỉ delay **câu đầu tiên** mỗi lượt nói, các câu sau trong cùng lượt không bị delay.
+
+### 6.2. Vị trí trong pipeline
+
+Đặt **giữa TTS và TTSAudioProcessor** — đây là vị trí duy nhất đảm bảo cả `TTSStartedFrame` và `TTSStoppedFrame` đều chảy qua processor:
+
+```
+Input → VAD → STT → HallucinationFilter → user_agg → (RAG) → LLM
+  → MarkdownStripper → PronNorm (optional) → TTS
+  → ⏳ ThinkingDelayProcessor (800ms)         ← SAU TTS
+  → TTSAudioProcessor → Output → assistant_agg
+```
+
+(`bot_fs.py` dòng 1270-1273):
+```python
+pipeline_steps.extend([
+    tts,
+    ThinkingDelayProcessor(800),
+    TTSAudioProcessor(),
+    transport.output(),
+    assistant_agg,
+])
+```
+
+### 6.3. Class ThinkingDelayProcessor
+
+(`bot_fs.py` dòng 1023-1053)
 
 ```python
 class ThinkingDelayProcessor(FrameProcessor):
-    """Chèn delay trước TTSStartedFrame đầu tiên để bot có cảm giác đang 'suy nghĩ'."""
+    """Chèn delay sau TTS: delay TTSStartedFrame đầu tiên mỗi lượt bot nói.
+
+    Đặt GIỮA TTS và TTSAudioProcessor.
+    TTSStartedFrame → delay `delay_ms` → forward xuống TTSAudioProcessor.
+    TTSStoppedFrame  → reset cờ → lượt sau được delay tiếp.
+    """
 
     def __init__(self, delay_ms: float = 800):
         super().__init__()
         self._delay_s = delay_ms / 1000.0
-        self._pending = True
+        self._pending = True  # delay lần TTSStarted đầu tiên sau mỗi TTSStopped
 
     async def process_frame(self, frame, direction):
         if direction == FrameDirection.DOWNSTREAM:
-            if isinstance(frame, TTSStartedFrame):
-                if self._pending:
-                    logger.info(f"⏳ Thinking delay {self._delay_s*1000:.0f}ms...")
-                    await asyncio.sleep(self._delay_s)
-                    self._pending = False
+            if isinstance(frame, TTSStartedFrame) and self._pending:
+                logger.info(f"⏳ Thinking delay {self._delay_s*1000:.0f}ms...")
+                await asyncio.sleep(self._delay_s)
+                self._pending = False
             elif isinstance(frame, TTSStoppedFrame):
-                self._pending = True
+                self._pending = True  # reset cho lượt nói tiếp theo
         await super().process_frame(frame, direction)
-        await self.push_frame(frame, direction)  # bắt buộc: forward frame
+        await self.push_frame(frame, direction)
 ```
 
-### 6.2. Vị trí trong pipeline (dòng 1262–1263)
+### 6.4. Luồng frame chi tiết
 
-```python
-pipeline_steps.extend([
-    ThinkingDelayProcessor(800),  # ⏳ khoảng dừng tự nhiên trước khi bot nói
-    tts,
-    ...
-])
+```
+Lượt bot nói (vd: greeting):
+  TTS xử lý text xong
+    → push TTSStartedFrame ──→ ThinkingDelayProcessor
+                                   ↓ _pending = True
+                                   ↓ "⏳ Thinking delay 800ms..."
+                                   ↓ asyncio.sleep(0.8)
+                                   ↓ _pending = False
+                                   ↓ forward TTSStartedFrame
+                               → TTSAudioProcessor → audio output
+    → push TTSAudioFrame ────→ ThinkingDelayProcessor
+                                   ↓ không phải TTSStartedFrame → forward ngay
+                               → TTSAudioProcessor → audio output
+    → push TTSStoppedFrame ──→ ThinkingDelayProcessor
+                                   ↓ _pending = True (reset)
+                                   ↓ forward TTSStoppedFrame
+                               → TTSAudioProcessor
+
+Người dùng nói → VAD → STT → LLM → ... (lượt mới)
+
+Lượt bot nói (trả lời câu hỏi):
+  TTSStartedFrame → ThinkingDelayProcessor
+                      ↓ _pending = True (đã được reset bởi TTSStoppedFrame)
+                      ↓ delay 800ms → forward → TTSAudioProcessor
+  ...cứ thế lặp lại cho mỗi lượt...
 ```
 
-### 6.3. Bug Fix Log
+### 6.5. Bug Fix Log (3 lần fix)
 
-| Lần | Code | Lỗi | Nguyên nhân |
-|-----|------|-----|-------------|
-| 1 | `self.push_frame(frame)` | `"StartFrame not received yet"` | Bỏ qua `super().process_frame()` → không set `__started` |
-| 2 | `super().process_frame()` (thiếu push) | `"CancelFrame timeout"` sau 5s | StartFrame/CancelFrame bị nuốt, không push xuống TTS |
-| 3 ✅ | `super().process_frame()` + `self.push_frame()` | **Hoạt động ổn định** | Đúng pattern: super xử lý state, push_frame forward tiếp |
+| Lần | Code | Lỗi | Nguyên nhân gốc rễ |
+|-----|------|-----|-------------------|
+| **1** | `self.push_frame(frame)` (bỏ qua super) | `"StartFrame not received yet"` trên console | Trong Pipecat 1.5.0, `push_frame()` gọi `_check_started()` kiểm tra `__started`. Chỉ có `super().process_frame()` mới set `__started = True` khi nhận `StartFrame`. Gọi `push_frame` trực tiếp → không set flag → mọi frame bị từ chối. |
+| **2** | `super().process_frame()` (thiếu push_frame) | `"CancelFrame timeout"` sau 5 giây, pipeline chết | Base class `process_frame()` xử lý `StartFrame` (set `__started`) và `CancelFrame` (set `_cancelling`) nhưng **không tự động push frame xuống processor tiếp theo**. CancelFrame bị nuốt → không đến cuối pipeline → `wait_for_cancel()` timeout. |
+| **3a** | `super()` + `push_frame()`, processor **trước** TTS, intercept `TextFrame` | Chỉ delay greeting, các câu sau không delay | `TTSStoppedFrame` do TTS push ra output, **không chảy ngược qua processor** khi processor đặt trước TTS. `_pending` không reset → chỉ delay đúng 1 lần duy nhất. |
+| **3b ✅** | `super()` + `push_frame()`, processor **sau** TTS, intercept `TTSStartedFrame`/`TTSStoppedFrame` | **Hoạt động đúng** | Cả `TTSStartedFrame` (trigger delay) và `TTSStoppedFrame` (reset) đều chảy qua processor khi nó nằm sau TTS. Mỗi lượt bot nói đều được delay. |
 
-**Root cause:** Trong Pipecat 1.5.0, `FrameProcessor.process_frame()` xử lý `StartFrame` (set `__started=True`) và `CancelFrame` (set `_cancelling=True`) nhưng **không tự động push frame xuống processor tiếp theo**. Pattern đúng là:
-
+**Pattern đúng cho FrameProcessor trong Pipecat 1.5.0:**
 ```python
 async def process_frame(self, frame, direction):
     # Custom logic (delay, filter, ...)
-    await super().process_frame(frame, direction)  # state management
-    await self.push_frame(frame, direction)        # forward to next processor
+    await super().process_frame(frame, direction)  # bắt buộc: xử lý state (StartFrame→__started, CancelFrame→_cancelling, ...)
+    await self.push_frame(frame, direction)         # bắt buộc: forward frame xuống processor tiếp theo
 ```
+
+### 6.6. Tại sao intercept TTSStartedFrame thay vì TextFrame?
+
+| Frame | Vị trí phát | Chảy qua processor khi đặt sau TTS? |
+|-------|-------------|--------------------------------------|
+| `TextFrame` | LLM → MarkdownStripper → PronNorm | ❌ Không (đã bị TTS tiêu thụ trước) |
+| `TTSStartedFrame` | TTS (khi bắt đầu gen audio) | ✅ Có |
+| `TTSStoppedFrame` | TTS (khi gen xong) | ✅ Có |
+| `TTSAudioFrame` | TTS (từng chunk audio) | ✅ Có |
+
+→ Intercept `TTSStartedFrame` là lựa chọn duy nhất: nó chỉ xuất hiện 1 lần mỗi lượt (tự nhiên), và `TTSStoppedFrame` reset cờ cũng chỉ 1 lần.
 
 ---
 
