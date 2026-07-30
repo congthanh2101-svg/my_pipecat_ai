@@ -47,10 +47,16 @@ local api = freeswitch.API()
 
 
 
--- Set codec
+-- Set codec + DTMF mode
 session:execute("set", "absolute_codec_string=PCMU")
 session:setVariable("STREAM_PLAYBACK", "true")
 session:setVariable("STREAM_SAMPLE_RATE", SAMPLE_RATE)
+-- Bật DTMF events qua ESL để Pipecat bot detect được
+-- (hoạt động với mọi DTMF mode: in-band, RFC2833, SIP-INFO)
+session:setVariable("rfc2833_dtmf_events", "true")
+session:setVariable("inbound_dtmf_events", "true")
+-- Fallback: in-band vẫn hoạt động nếu client không gửi RFC2833
+session:execute("set", "dtmfmode=inband")
 
 
 
@@ -76,8 +82,10 @@ session:execute("endless_playback", "silence_stream://-1")
 local duration = os.time() - start_epoch
 log("INFO", string.format("Call ended | status=%s duration=%ds", call_status, duration))
 
--- Dừng audio stream
-api:executeString(string.format("uuid_audio_stream %s stop", call_uuid))
+-- Không stop audio stream ở đây — để Pipecat bot tự cleanup.
+-- Nếu stop stream trong Lua script, nó sẽ đóng WebSocket ngay lập tức,
+-- làm bot không kịp nói goodbye và pipeline bị cancel sớm.
+-- Bot sẽ gọi uuid_audio_stream stop sau khi nói xong thông báo.
 
 
 -- Xác định trạng thái cuối

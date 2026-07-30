@@ -1,327 +1,372 @@
-# Tool Calling — Transfer Cuộc Gọi Đến Queue Tổng Đài
-## Tài Liệu Kiến Trúc, Triển Khai, Bug Fix & Hướng Dẫn Sử Dụng
+# Tool Calling, DTMF, CRM & Transfer Extension
+## Tai Lieu Kien Truc, Trien Khai & Huong Dan Su Dung
 
-> **Cập nhật:** 2026-07-30
-> **Phiên bản code:** fs_tools.py + bot_fs.py
-> **Tác giả:** Claude Code
-
----
-
-## 1. Mục Tiêu
-
-Khi khách hàng nói với bot các câu như "cho tôi gặp nhân viên tư vấn", "chuyển máy cho tổng đài viên", "gọi điện thoại viên", bot sẽ:
-1. Nhận diện ý định qua LLM function calling
-2. Gọi REST API để chuyển cuộc gọi vào queue `support@default` của FreeSWITCH Call Center
-3. Thông báo cho khách hàng trước khi ngắt kết nối
-4. Ngắt `mod_audio_stream` để caller có thể nói chuyện với agent qua queue
+> **Cap nhat:** 2026-07-31  
+> **Phien ban code:** fs_tools.py, dtmf_detector.py, dtmf_handler.py, crm_db.py, crm_tools.py, bot_fs.py, pipecat_ivr_inbound.lua  
+> **Tac gia:** Claude Code
 
 ---
 
-## 2. Kiến Trúc Tổng Thể
+## 1. Tong Quan Cac Tinh Nang
 
-```mermaid
-sequenceDiagram
-    participant Caller
-    participant FS as FreeSWITCH
-    participant API as FS API Server
-    participant Bot as FS Bot (Pipecat)
-
-    Caller->>FS: Gọi SIP
-    FS->>Bot: uuid_audio_stream start
-    Bot->>Caller: Chào hỏi, trò chuyện...
-    
-    Caller->>Bot: "Cho tôi gặp nhân viên tư vấn"
-    Bot->>Bot: LLM detect intent → gọi transfer_to_agent()
-    
-    Bot->>API: POST /auth/token (JWT)
-    API->>Bot: token
-    
-    Bot->>API: POST /queues/transfer/{call_uuid}
-    API->>FS: uuid_transfer → call vào queue
-    API->>Bot: {"success": true}
-    
-    Bot->>Bot: Schedule cleanup sau 8s ⏰
-    Bot->>Caller: "Tôi đã chuyển máy cho nhân viên hỗ trợ..." 🔊
-    
-    Note over Bot: 8s later... cleanup task fires
-    
-    Bot->>API: POST /commands uuid_audio_stream stop
-    API->>FS: uuid_audio_stream stop
-    
-    FS->>FS: Ngắt mod_audio_stream
-    FS->>Bot: WebSocket close → pipeline cleanup
-    
-    Caller->>FS: Nghe MOH từ queue
-    FS->>Caller: Agent pick up → nói chuyện ✅
-```
-
-### 2.1. Vai trò các thành phần
-
-| Thành phần | Vai trò |
-|------------|---------|
-| **FS Bot (Pipecat)** | Nhận diện giọng nói, LLM, TTS, tool calling |
-| **FS API Server** | REST API wrapper cho FreeSWITCH ESL (ESL connection pool) |
-| **FreeSWITCH** | Xử lý cuộc gọi, callcenter queue, uuid_audio_stream |
-
-### 2.2. Tool Calling Flow (Pipecat 1.5.0)
-
-```
-LLMContext(tools=[transfer_handler]) → LLM service auto-register
-  → User nói → VAD → STT → user_agg → LLMContextFrame
-  → LLM service sync tools → gửi request tới Ollama với tool definitions
-  → Ollama response: tool_call("transfer_to_agent", args={"reason": "..."})
-  → LLM service tạo FunctionCallFromLLM
-  → run_function_calls() → dispatches tới handler
-  → Handler: POST HTTP tới FS API → result_callback
-  → Aggregator thêm tool result vào context
-  → LLM tiếp tục sinh text → TTS → audio output
-```
+| Tinh nang | Mo ta | Trang thai |
+|-----------|-------|-----------|
+| **Transfer Queue** | Chuyen cuoc goi den queue callcenter (support@default) | ✅ Hoat dong |
+| **Transfer Extension** | Chuyen cuoc goi den so may le cu the | ✅ Hoat dong |
+| **DTMF RFC2833** | Phim bam qua RTP events → Lua callback → API | ✅ Hoat dong |
+| **DTMF SIP-INFO** | Phim bam qua SIP INFO → Lua callback → API | ✅ Hoat dong |
+| **DTMF In-band** | Phim bam trong audio → FFT detect → pipeline | ✅ Hoat dong |
+| **CRM Lookup** | Tra cuu khach hang, don hang, san pham, FAQ | ✅ Hoat dong |
+| **CRM FAQ Dynamics** | Luu cau hoi moi tu cuoc goi, tu hoc cho lan sau | ✅ Hoat dong |
 
 ---
 
-## 3. File Mới: `fs_tools.py` (263 dòng)
+## 2. Kien Truc Tong The
 
-### 3.1. Module-level State
+### 2.1. So Do He Thong
 
-```python
-_jwt_token: str | None = None           # JWT cache (module-level, shared)
-_jwt_expiry: float = 0.0                # monotonic timestamp
-_http_client: httpx.AsyncClient | None  # Shared HTTP client singleton
-_TRANSFER_CLEANUP_DELAY = 8             # Delay trước khi stop audio stream (giây)
+```
+                           ┌─────────────────────┐
+                           │   FreeSWITCH         │
+                           │  (mod_audio_stream)  │
+                           │  pipecat_ivr_inbound │
+                           │  .lua               │
+                           └────┬────┬────┬───────┘
+                                │    │    │
+              ┌─────────────────┤    │    └──────────────────┐
+              │ RFC2833/SIP-INFO│    │ In-band              │
+              │ (setInputCallback)│  │ (audio stream)       │
+              ▼                 │    ▼                      ▼
+     ┌────────────────┐        │   ┌──────────────────────────┐
+     │  Lua curl      │        │   │  FFT Detector            │
+     │  POST/GET      │        │   │  (dtmf_detector.py)      │
+     │  /dtmf-notify  │        │   └──────────┬───────────────┘
+     └───────┬────────┘        │              │
+             │                 │              │ InputDTMFFrame
+             ▼                 │              ▼
+     ┌────────────────┐        │   ┌──────────────────────────┐
+     │  Bot HTTP      │        │   │  DTMFAggregator          │
+     │  endpoint      │        │   │  (built-in Pipecat)      │
+     │  -> direct     │        │   └──────────┬───────────────┘
+     │  transfer      │        │              │ TranscriptionFrame
+     └───────┬────────┘        │              ▼
+             │                 │   ┌──────────────────────────┐
+             ▼                 │   │  DTMFActionHandler       │
+     ┌────────────────┐        │   │  (dtmf_handler.py)       │
+     │  FS API Server │        │   │  0 -> transfer           │
+     │  192.168.1.153 │        │   │  # -> end call           │
+     │  :8443         │        │   └──────────────────────────┘
+     └───────┬────────┘        │
+             │                 │
+             ▼                 ▼
+     ┌─────────────────────────────────────────────────┐
+     │            Callcenter Queue                      │
+     │         support@default / sale_queue / tech_queue │
+     │                                                 │
+     │  Agent01 (1016) / Agent02 (1012) / ...          │
+     └─────────────────────────────────────────────────┘
 ```
 
-### 3.2. Các hàm
+### 2.2. Danh Sach File
 
-| Hàm | Mô tả |
-|-----|-------|
-| `_get_http_client()` | Singleton httpx.AsyncClient (timeout 10s) |
-| `cleanup_http_client()` | Đóng HTTP client (gọi từ finally) |
-| `_ensure_token(client, base_url, username, password)` | Lấy/cache JWT token, tự động refresh |
-| `_call_transfer_api(client, base_url, call_uuid, queue_name, token)` | POST /queues/transfer/{uuid} |
-| `_call_stop_audio_stream(client, base_url, call_uuid, token)` | POST /commands uuid_audio_stream stop |
-| `_delayed_stop_audio(client, base_url, call_uuid, token, delay_secs)` | Sleep delay → stop stream |
-| `create_transfer_tool(call_uuid, api_base_url, api_username, api_password, queue_name)` | **Factory**: tạo direct function handler (closure) |
+| File | Chuc nang | DONG |
+|------|-----------|------|
+| `bot_fs.py` | Server chinh: FastAPI endpoints, pipeline, DTMF notify, env vars | ~1979 |
+| `fs_tools.py` | Transfer tools: queue, extension, JWT cache, HTTP client, cleanup | ~280 |
+| `dtmf_detector.py` | FFT in-band detector + Queue poll processor | ~170 |
+| `dtmf_handler.py` | DTMF action handler: 0→transfer, #→end call | ~70 |
+| `crm_db.py` | CRM SQLite database: customers, orders, products, FAQ + seed | ~200 |
+| `crm_tools.py` | 5 tool handlers: lookup, orders, products, FAQ, save | ~160 |
+| `pipecat_ivr_inbound.lua` | FreeSWITCH Lua: DTMF callback (setInputCallback) | ~130 |
+| `l16_serializer.py` | L16 PCM serializer + AGC + protobuf cho FS | ~340 |
+| `ai_call_handler.lua` | Lua script cu (backup) | ~110 |
+| `plans/add-tool-transfer.md` | Tai lieu nay | ~400 |
 
-### 3.3. Handler `transfer_to_agent` (chi tiết)
+### 2.3. Bien Moi Truong
 
-```python
-async def transfer_to_agent(params, reason: str = ""):
-    """Direct function handler cho Pipecat LLM function calling.
-
-    Gọi hàm này khi khách hàng yêu cầu gặp nhân viên hỗ trợ.
-
-    Args:
-        reason: Lý do khách hàng muốn gặp nhân viên (có thể để trống)
-    """
-    # 1. JWT Auth
-    token = await _ensure_token(...)
-
-    # 2. Transfer call vào queue (ngay lập tức)
-    result = await _call_transfer_api(...)  # POST /queues/transfer/{uuid}
-
-    if transfer_ok:
-        # 3. Schedule cleanup: stop audio stream sau 8s
-        #    Cho LLM + TTS kịp nói goodbye trước khi ngắt
-        asyncio.create_task(
-            _delayed_stop_audio(client, base_url, call_uuid, token, delay)
-        )
-
-    # 4. Trả kết quả → LLM sinh thông báo → TTS đọc
-    await params.result_callback(result)
-```
-
-### 3.4. Dependencies
-
-```bash
-pip install httpx
-```
-
----
-
-## 4. File Sửa: `bot_fs.py`
-
-| Vị trí | Thay đổi |
-|--------|----------|
-| Import | `from fs_tools import create_transfer_tool, cleanup_http_client` |
-| Config (sau OMNIVOICE_NUM_STEP) | 4 env vars mới: `FS_API_BASE_URL`, `FS_API_USERNAME`, `FS_API_PASSWORD`, `FS_API_QUEUE` |
-| `create_pipeline()` signature | Thêm `call_uuid=""`, `fs_api_config=None` |
-| `create_pipeline()` body | Nếu có call_uuid + config → tạo `TransferTool` → `LLMContext(tools=[handler])` |
-| WebSocket handlers (`/audio-stream`, `/rtvi-ws`) | Tạo `fs_api_config` dict, truyền vào `create_pipeline()` |
-| SYSTEM_PROMPT | Thêm instruction: sau khi gọi transfer, thông báo cho khách |
-
-### Env Vars Added
-
-```python
-FS_API_BASE_URL = os.getenv("FS_API_BASE_URL", "http://192.168.1.153:8443/api/v1")
-FS_API_USERNAME = os.getenv("FS_API_USERNAME", "admin")
-FS_API_PASSWORD = os.getenv("FS_API_PASSWORD", "Winter2024$")
-FS_API_QUEUE   = os.getenv("FS_API_QUEUE", "support@default")
-```
-
-### SYSTEM_PROMPT Updated
-
-```python
-"- Khi khách hàng yêu cầu gặp nhân viên hỗ trợ / tổng đài viên / tư vấn viên / "
- "gặp người thật / chuyển máy cho điện thoại viên, "
- "hãy gọi hàm transfer_to_agent để chuyển cuộc gọi đến nhân viên tổng đài.\n"
- "- Sau khi gọi transfer_to_agent, hãy nói với khách hàng rằng "
- "cuộc gọi đang được chuyển và cảm ơn họ đã sử dụng dịch vụ.\n"
-```
-
----
-
-## 5. File Sửa: `pyproject.toml`
-
-```toml
-"httpx>=0.27.0",
-```
-
----
-
-## 6. Bug Fix Log
-
-### Bug 1: Caller không nói chuyện được với agent sau transfer
-
-**Triệu chứng:** Tool call thành công, call vào queue, agent pick up nhưng 2 bên không nói chuyện được với nhau.
-
-**Nguyên nhân gốc rễ:** `uuid_transfer` di chuyển channel vào queue, nhưng `mod_audio_stream` (kết nối WebSocket từ FreeSWITCH đến FS Bot) vẫn hoạt động độc lập. Luồng audio vẫn chạy qua bot thay vì qua agent.
-
-**Fix:** Sau khi transfer, gọi thêm `uuid_audio_stream <uuid> stop` qua API `/api/v1/commands`:
-```python
-async def _call_stop_audio_stream(client, base_url, call_uuid, token):
-    """POST /api/v1/commands {"command": "uuid_audio_stream", "args": "<uuid> stop"}"""
-    resp = await client.post(
-        f"{base_url}/commands",
-        json={"command": "uuid_audio_stream", "args": f"{call_uuid} stop"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-```
-
-### Bug 2: Caller không nghe được thông báo goodbye
-
-**Triệu chứng:** Transfer thành công, `uuid_audio_stream stop` được gọi, nhưng caller không nghe được câu thông báo "Tôi đã chuyển máy cho nhân viên hỗ trợ..."
-
-**Nguyên nhân gốc rễ:** `stop_audio_stream` được gọi NGAY SAU transfer, trước khi LLM kịp generate text và TTS kịp nói. Audio stream đã ngắt nên TTS output không đến được caller.
-
-**Fix:** Delay `stop_audio_stream` bằng `asyncio.create_task()` với sleep 8 giây (config qua `FS_TRANSFER_CLEANUP_DELAY`):
-```python
-delay = _TRANSFER_CLEANUP_DELAY  # default 8s
-asyncio.create_task(
-    _delayed_stop_audio(client, base_url, call_uuid, token, delay)
-)
-# result_callback → LLM generate → TTS nói (có thể nghe được)
-await params.result_callback(result)
-```
-
-**Timeline sau fix:**
-```
-T=0s:   User nói "gặp nhân viên"
-T=1s:   LLM detect intent → gọi transfer_to_agent
-T=1.1s: POST /transfer/{uuid} → call vào queue
-T=1.2s: Schedule cleanup (T=9.2s)
-T=1.3s: result_callback → LLM generate goodbye
-T=2s:   TTS bắt đầu nói 🔊 (caller nghe được)
-T=5s:   TTS nói xong
-T=9.2s: Cleanup → uuid_audio_stream stop
-T=9.3s: Caller nghe MOH từ queue → agent pick up ✅
-```
-
----
-
-## 7. Env Vars Reference
-
-| Biến | Mặc định | Mô tả |
+| Bien | Mac dinh | Mo ta |
 |------|----------|-------|
 | `FS_API_BASE_URL` | `http://192.168.1.153:8443/api/v1` | Base URL FS REST API |
 | `FS_API_USERNAME` | `admin` | Username JWT auth |
 | `FS_API_PASSWORD` | `Winter2024$` | Password JWT auth |
-| `FS_API_QUEUE` | `support@default` | Queue đích để transfer |
-| `FS_TRANSFER_CLEANUP_DELAY` | `8` | Delay (giây) trước khi stop audio stream |
+| `FS_API_QUEUE` | `support@default` | Queue dich |
+| `FS_TRANSFER_CLEANUP_DELAY` | `8` | Delay (giay) truoc khi stop audio stream |
+| `DTMF_ENABLED` | `true` | Bat/tat DTMF detection |
+| `CRM_DB_PATH` | `data/crm.db` | Duong dan CRM database |
 
 ---
 
-## 8. FS REST API Endpoints Used
+## 3. DTMF Detection (3 Mode)
 
-| Method | Endpoint | Mô tả |
-|--------|----------|-------|
+### 3.1. Kien Truc
+
+Co 3 co che phat hien DTMF hoat dong song song:
+
+#### A. RFC2833 & SIP-INFO (qua Lua setInputCallback)
+
+```
+FreeSWITCH nhan DTMF (RFC2833/SIP-INFO)
+  → Lua on_input(s, "dtmf", {digit="0"})
+  → curl GET http://192.168.1.20:8086/dtmf-notify/{uuid}/{digit}
+  → bot_fs.py: dtmf_notify_endpoint()
+  → _execute_dtmf_transfer() duoc goi truc tiep
+  → POST /api/v1/callcenter/queues/transfer/{uuid}
+  → queue support@default ✅
+```
+
+#### B. In-band (qua FFT)
+
+```
+Audio stream (co tone DTMF in-band)
+  → DTMFDetectorProcessor (numpy FFT)
+  → InputDTMFFrame(button=KeypadEntry.ZERO)
+  → DTMFAggregator (built-in Pipecat)
+  → TranscriptionFrame("DTMF: 0")
+  → DTMFActionHandler
+  → _dtmf_transfer() → queue ✅
+```
+
+### 3.2. File: `pipecat_ivr_inbound.lua`
+
+Lua script chay tren FreeSWITCH, chiu trach nhiem:
+- Answer cuoc goi
+- Start uuid_audio_stream den Pipecat bot
+- Record cuoc goi
+- Lang nghe DTMF qua `setInputCallback`
+- Khi co phim bam: curl ve bot
+
+```lua
+-- Thiet lap DTMF mode
+session:setVariable("rfc2833_dtmf_events", "true")
+session:setVariable("inbound_dtmf_events", "true")
+session:execute("set", "dtmfmode=inband")
+
+-- Input callback (hoat dong voi MOI mode)
+function on_input(s, input_type, obj)
+    if input_type == "dtmf" and obj and obj.digit then
+        os.execute(string.format(
+            "curl -s -m 3 'http://192.168.1.20:8086/dtmf-notify/%s/%s' >/dev/null 2>&1 &",
+            call_uuid, obj.digit))
+    end
+    return ""
+end
+session:setInputCallback("on_input")
+
+-- Giu session song
+while session:ready() do session:streamFile("silence_stream://-1") end
+```
+
+### 3.3. File: `dtmf_detector.py`
+
+2 class processor:
+
+| Class | Co che | Input | Output |
+|-------|--------|-------|--------|
+| `DTMFDetectorProcessor` | FFT numpy (in-band) | InputAudioRawFrame | InputDTMFFrame |
+| `DTMFPollProcessor` | Queue (RFC2833/SIP-INFO) | asyncio.Queue | InputDTMFFrame |
+
+### 3.4. File: `dtmf_handler.py`
+
+`DTMFActionHandler` — FrameProcessor bat `TranscriptionFrame("DTMF: ...")`:
+
+| Digit | Hanh dong |
+|-------|-----------|
+| `0` | Goi `_dtmf_transfer()` → queue support@default |
+| `#` | Goi `_dtmf_end_call()` → stop stream + end call |
+| Khac | Forward xuong LLM de xu ly (cho mo rong menu) |
+
+---
+
+## 4. Transfer Tools
+
+### 4.1. File: `fs_tools.py`
+
+| Ham | Chuc nang |
+|-----|-----------|
+| `create_transfer_tool()` | Tao handler cho queue transfer (callcenter) |
+| `create_transfer_extension_tool()` | Tao handler cho extension transfer |
+| `_ensure_token()` | Cache JWT token (24h), auto-refresh |
+| `_call_transfer_api()` | POST /queues/transfer/{uuid} |
+| `_call_transfer_extension_api()` | POST /calls/{uuid}/transfer |
+| `_call_stop_audio_stream()` | POST /commands uuid_audio_stream stop |
+| `_delayed_stop_audio()` | Stop stream sau delay (cho TTS noi goodbye) |
+
+### 4.2. Transfer to Queue
+
+```python
+POST /api/v1/callcenter/queues/transfer/{call_uuid}
+Body: {"queue_name": "support@default"}
+```
+
+Goi `uuid_transfer <uuid> callcenter:<queue> inline default` trong FS.
+
+### 4.3. Transfer to Extension
+
+```python
+POST /api/v1/calls/{uuid}/transfer
+Body: {"destination": "101", "dialplan": "XML", "context": "default"}
+```
+
+Goi `uuid_transfer <uuid> user/<ext> XML default` trong FS.
+
+### 4.4. Cleanup Flow
+
+Sau transfer, bot can stop `uuid_audio_stream` de ngat ket noi:
+
+1. Bot schedule `_delayed_stop_audio()` voi delay `FS_TRANSFER_CLEANUP_DELAY` (default 8s)
+2. Delay cho TTS noi xong goodbye
+3. Goi `POST /api/v1/commands` voi `uuid_audio_stream <uuid> stop`
+4. WebSocket dong → pipeline cleanup
+
+**Bug fix:** Lua script KHONG duoc goi `uuid_audio_stream stop` vi se gay conflict.
+(Lua cleanup da duoc comment bo: `-- api:executeString(...)`)
+
+---
+
+## 5. CRM & Knowledge Base
+
+### 5.1. File: `crm_db.py`
+
+SQLite database voi 4 bang:
+
+```sql
+customers (8 records)   — phone, name, debt, total_spent, loyalty_points
+orders (18 records)     — customer_id, product_name, amount, status
+products (15 records)   — name, category, price, stock, description
+faq (10 records)        — question, answer, category, source
+```
+
+Seed data tu tao lan dau khi DB chua ton tai.
+
+### 5.2. File: `crm_tools.py`
+
+5 direct function handlers cho Pipecat LLM:
+
+| Tool | Chuc nang |
+|------|-----------|
+| `lookup_customer(phone)` | Tra cuu KH theo SDT: ten, du no, diem thuong |
+| `check_orders(phone)` | Kiem tra don hang theo SDT |
+| `search_product(query)` | Tim san pham theo ten/danh muc |
+| `search_faq(query)` | Tim cau hoi thuong gap |
+| `save_faq(question, answer)` | Luu cau hoi moi (hoc tu cuoc goi) |
+
+### 5.3. 2 He Thong KB Song Song
+
+| He thong | Luu tru | Co che | Dung cho |
+|----------|---------|--------|----------|
+| **RAG cu** (knowledge_base.py) | ChromaDB | Vector search (tu dong) | Kien thuc noi bo (cong ty, chinh sach) |
+| **CRM moi** (crm_db.py) | SQLite | Tool calling (chu dong) | Customer, order, product, FAQ |
+
+---
+
+## 6. Pipeline Hoan Chinh
+
+```
+transport.input()
+  → DTMFDetectorProcessor           (FFT in-band)
+  → DTMFPollProcessor               (queue tu /dtmf-notify)
+  → VAD (SileroVADAnalyzer)
+  → STT (Whisper|VietASR|Gipformer)
+  → HallucinationFilter
+  → DTMFAggregator                  (InputDTMFFrame → TranscriptionFrame)
+  → DTMFActionHandler               (0→transfer, #→end)
+  → user_agg (LLMUserAggregator)
+  → RAGProcessor                    (optional, ChromaDB)
+  → llm (Ollama|Deepseek)
+    [tools: transfer_to_agent, transfer_to_extension,
+     lookup_customer, check_orders, search_product, search_faq, save_faq]
+  → MarkdownStripper
+  → PronunciationNormalizer         (optional)
+  → tts (Piper|OmniVoice)
+  → ThinkingDelayProcessor          (800ms)
+  → TTSAudioProcessor               (resample 22050→8kHz)
+  → transport.output()
+  → assistant_agg
+```
+
+---
+
+## 7. FS REST API Endpoints Su Dung
+
+| Method | Endpoint | Muc dich |
+|--------|----------|----------|
 | `POST` | `/api/v1/auth/token` | JWT authentication |
-| `POST` | `/api/v1/callcenter/queues/transfer/{call_uuid}` | Transfer call vào queue |
-| `POST` | `/api/v1/commands` | Chạy lệnh FS API bất kỳ (dùng cho uuid_audio_stream stop) |
+| `POST` | `/api/v1/callcenter/queues/transfer/{call_uuid}` | Transfer to queue |
+| `POST` | `/api/v1/calls/{uuid}/transfer` | Transfer to extension |
+| `POST` | `/api/v1/commands` | Raw FS command (uuid_audio_stream stop) |
 
 ---
 
-## 9. Hướng Dẫn Sử Dụng
+## 8. So Dien Thoai CRM
 
-### Chạy bot
+| SDT | Ten | Ghi chu |
+|-----|-----|---------|
+| 0901234567 | Nguyen Van An | VIP, chi 45tr |
+| 0909876543 | Tran Thi Binh | No 2.5tr |
+| 0912345678 | Le Van Cuong | Chi 89tr, 2500 diem |
+| 0933445566 | Pham Thi Dung | VIP, no 1.5tr |
+| 0977889900 | Hoang Van Em | Moi, chi 5.5tr |
+| 0905112233 | Do Thi Phuong | No 500k |
+| 0988776655 | Mai Van Giau | **Than thiet nhat**, chi 150tr, 5000 diem |
+| 0911223344 | Vu Thi Hanh | Chi 7.2tr |
+
+---
+
+## 9. Huong Dan Su Dung
+
+### Chay bot
 
 ```bash
 cd /opt/my_pipecat_ai/freeswitch_agent
+source .venv/bin/activate
 
-# Mặc định
-python bot_fs.py
+# Mac dinh (Whisper STT + Ollama LLM + Piper TTS)
+python3 bot_fs.py
 
-# Với config tuỳ chỉnh
-FS_API_QUEUE=tech_queue FS_TRANSFER_CLEANUP_DELAY=12 python bot_fs.py
+# Lựa chon STT
+STT_PROVIDER=gipformer python3 bot_fs.py
+STT_PROVIDER=vietasr python3 bot_fs.py
+
+# Lựa chon TTS
+TTS_ENGINE=omnivoice python3 bot_fs.py
+
+# Lựa chon LLM
+LLM_PROVIDER=deepseek DEEPSEEK_API_KEY=sk-xxx python3 bot_fs.py
 ```
 
-### Test API (từ xa qua SSH)
+### Kich ban test
 
 ```bash
-# Auth
-curl -sk http://192.168.1.153:8443/api/v1/auth/token \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"Winter2024$"}'
-
-# Kiểm tra transfer (fake UUID)
-curl -sk -X POST "http://192.168.1.153:8443/api/v1/callcenter/queues/transfer/fake-uuid" \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"queue_name": "support@default"}'
-
-# Kiểm tra queues
-curl -sk "http://192.168.1.153:8443/api/v1/callcenter/queues" \
-  -H "Authorization: Bearer <token>"
+# 1. Goi SIP vao bot → bot chao
+# 2. DTMF 0 → bot nhan → transfer vao queue → agent pick up
+# 3. "chuyen may 101" → LLM goi transfer_to_extension → extension 101 do chuong
+# 4. "kiem tra thong tin so 0901234567" → CRM lookup
+# 5. "co ban iPhone khong?" → search product
+# 6. "chinh sach bao hanh?" → search FAQ
+# 7. DTMF # → bot noi tam biet → call ket thuc
 ```
 
-### Kiểm tra sau khi chạy
+### Kiem tra CRM
 
-1. Gọi SIP vào bot
-2. Nói "cho tôi gặp nhân viên tư vấn"
-3. Kiểm tra log:
-   ```
-   🔄 Transfer requested: call=xxx, queue=support@default
-   ✅ Transfer success: {...}
-   ⏰ Will stop audio stream in 8s (after TTS finishes)
-   🔊 TTS đọc thông báo
-   ⏰ Cleanup delay elapsed, stopping audio stream for xxx
-   ✅ Audio stream stopped: +OK
-   ```
-4. Kiểm tra trên FS:
-   ```bash
-   fs_cli -x "callcenter_config queue list members support@default"
-   ```
-5. Agent pick up → caller + agent nói chuyện ✅
+```bash
+cd /opt/my_pipecat_ai/freeswitch_agent
+sqlite3 data/crm.db -header -column \
+  "SELECT name, phone, debt, loyalty_points FROM customers"
+
+sqlite3 data/crm.db -header -column \
+  "SELECT count(*) as faqs, source FROM faq GROUP BY source"
+```
 
 ---
 
-## 10. Error Handling
+## 10. Thong Tin FS Server
 
-| Tình huống | Hành vi |
-|---|---|
-| FS API unreachable | result_callback({"success": false}) → LLM nói "Xin lỗi, không thể chuyển máy" |
-| Call UUID không tồn tại | API trả về `-ERR No such channel!` → LLM thông báo lỗi |
-| Model không hỗ trợ tool calling | Không có tool → bot trả lời text "tôi không thể chuyển máy" |
-| RTVI client (không có call_uuid) | `call_uuid=""` → tool không register → ignore |
-| Stop audio stream thất bại | Warning log, không crash pipeline |
-| Cleanup delay chưa chạy (call kết thúc trước) | `uuid_audio_stream stop` trả về `-ERR` → ignore |
-
----
-
-## 11. Các File Trong Tính Năng Này
-
-| File | Trạng thái |
-|------|------------|
-| `fs_tools.py` | **NEW** — Tool handler, HTTP client, JWT cache |
-| `bot_fs.py` | **MODIFY** — Config, import, pipeline, SYSTEM_PROMPT |
-| `pyproject.toml` | **MODIFY** — httpx dependency |
-| `plans/add-tool-transfer.md` | **NEW** — Tài liệu này |
+- **Host:** 192.168.1.153 (fs-ubt23)
+- **FS API:** http://localhost:8443/api/v1
+- **Auth:** JWT (admin / Winter2024$)
+- **FS version:** 1.10.13-dev (git 2025-11-21)
+- **Queues:** support@default, tech_queue, sale_queue
+- **Agents:** Agent01(1016), Agent02(1012), Agent03-10
+- **ESL:** 127.0.0.1:8021 / ClueCon
+- **DTMF endpoints:** /api/v1/calls/{uuid}/dtmf/start|poll|stop
+- **DTMF collector:** Da thread subscribing DTMF events (ESL)

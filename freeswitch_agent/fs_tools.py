@@ -163,6 +163,27 @@ async def _delayed_stop_audio(
     await _call_stop_audio_stream(client, base_url, call_uuid, token)
 
 
+async def _call_transfer_extension_api(
+    client: httpx.AsyncClient,
+    base_url: str,
+    call_uuid: str,
+    extension: str,
+    token: str,
+) -> dict:
+    """Gọi API transfer call đến máy lẻ cụ thể.
+
+    POST /api/v1/calls/{uuid}/transfer
+    Body: {"destination": "<ext>", "dialplan": "XML", "context": "default"}
+    """
+    resp = await client.post(
+        f"{base_url}/calls/{call_uuid}/transfer",
+        json={"destination": extension, "dialplan": "XML", "context": "default"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def create_transfer_tool(
     call_uuid: str,
     api_base_url: str,
@@ -260,3 +281,68 @@ def create_transfer_tool(
             })
 
     return transfer_to_agent
+
+
+def create_transfer_extension_tool(
+    call_uuid: str,
+    api_base_url: str,
+    api_username: str,
+    api_password: str,
+):
+    """Factory: tạo direct function handler cho transfer đến máy lẻ cụ thể.
+
+    Dùng POST /api/v1/calls/{uuid}/transfer thay vì callcenter queue.
+
+    Args:
+        call_uuid: UUID của cuộc gọi.
+        api_base_url: Base URL của FS API.
+        api_username: Username JWT auth.
+        api_password: Password JWT auth.
+
+    Returns:
+        Direct function handler để đưa vào LLMContext(tools=[...]).
+    """
+    client = _get_http_client()
+    base_url = api_base_url.rstrip("/")
+
+    async def transfer_to_extension(params, extension: str):
+        """Chuyển cuộc gọi đến số máy lẻ cụ thể.
+
+        Gọi hàm này khi khách hàng yêu cầu chuyển máy đến số nội bộ,
+        máy lẻ, hoặc phòng ban cụ thể (vd: "101", "200", "phòng kỹ thuật").
+        Sau khi chuyển, bot sẽ ngắt kết nối để khách có thể nói chuyện
+        với người ở đầu máy kia.
+
+        Args:
+            extension: Số máy lẻ cần chuyển đến (vd: "101", "200")
+        """
+        logger.info(f"🔄 Transfer to extension: call={call_uuid}, ext={extension}")
+
+        try:
+            token = await _ensure_token(client, base_url, api_username, api_password)
+            result = await _call_transfer_extension_api(
+                client, base_url, call_uuid, extension, token
+            )
+
+            api_ok = result.get("success", False)
+            transfer_ok = result.get("data", {}).get("success", False) if api_ok else False
+            if api_ok and transfer_ok:
+                logger.info(f"✅ Transfer to extension {extension} success: {result}")
+                delay = _TRANSFER_CLEANUP_DELAY
+                logger.info(f"⏰ Will stop audio stream in {delay}s")
+                asyncio.create_task(
+                    _delayed_stop_audio(client, base_url, call_uuid, token, delay)
+                )
+                result["_stream_stopped"] = True
+            else:
+                logger.warning(f"⚠️ Transfer to extension returned error: {result}")
+
+            await params.result_callback(result)
+
+        except Exception as e:
+            logger.error(f"❌ Transfer to extension failed: {e}")
+            await params.result_callback({
+                "success": False, "error": f"Lỗi chuyển máy: {e}",
+            })
+
+    return transfer_to_extension

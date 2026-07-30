@@ -88,7 +88,12 @@ from gipformer_stt import GipformerSTTService
 from call_logger import CallLogger, extract_conversation
 from knowledge_base import KnowledgeBase, get_knowledge_base
 from rag_processor import RAGProcessor
-from fs_tools import create_transfer_tool, cleanup_http_client
+from fs_tools import create_transfer_tool, create_transfer_extension_tool, cleanup_http_client
+from dtmf_detector import DTMFDetectorProcessor, DTMFPollProcessor
+from dtmf_handler import DTMFActionHandler
+from pipecat.processors.aggregators.dtmf_aggregator import DTMFAggregator
+from crm_db import get_crm_db
+from crm_tools import create_crm_tools
 
 import logging
 
@@ -268,6 +273,9 @@ FS_API_USERNAME = os.getenv("FS_API_USERNAME", "admin")
 FS_API_PASSWORD = os.getenv("FS_API_PASSWORD", "Winter2024$")
 FS_API_QUEUE = os.getenv("FS_API_QUEUE", "support@default")
 
+# DTMF detection: bật/tắt phát hiện phím bấm từ điện thoại
+DTMF_ENABLED = os.getenv("DTMF_ENABLED", "true").lower() == "true"
+
 SYSTEM_PROMPT = (
     "Bạn là trợ lý giọng nói tiếng Việt thân thiện, hữu ích.\n\n"
     "Quy tắc:\n"
@@ -283,6 +291,13 @@ SYSTEM_PROMPT = (
     "hãy gọi hàm transfer_to_agent để chuyển cuộc gọi đến nhân viên tổng đài.\n"
     "- Sau khi gọi transfer_to_agent, hãy nói với khách hàng rằng "
     "cuộc gọi đang được chuyển và cảm ơn họ đã sử dụng dịch vụ.\n"
+    "- Khi khách hàng hỏi về thông tin cá nhân / tài khoản / đơn hàng, "
+    "hãy gọi lookup_customer và check_orders để tra cứu.\n"
+    "- Khi khách hàng hỏi về sản phẩm / giá / tình trạng hàng, "
+    "hãy gọi search_product.\n"
+    "- Khi khách hàng hỏi câu hỏi mà bạn không chắc chắn, "
+    "hãy gọi search_faq. Nếu vẫn không có, nói 'chưa có thông tin' "
+    "và gọi save_faq để lưu lại cho lần sau.\n"
 )
 
 # RAG (Retrieval-Augmented Generation) — kiến thức nội bộ
@@ -304,6 +319,7 @@ CLIENT_HTML = Path(__file__).parent / "client"
 REACT_C1_DIR = Path("/opt/my_pipecat_ai/react-c1")
 _active_connections: set[str] = set()
 _chat_queue: dict[str, asyncio.Queue] = {}
+_dtmf_queues: dict[str, asyncio.Queue] = {}
 _connection_counter = 0
 
 
@@ -1243,18 +1259,27 @@ async def create_pipeline(
         Tuple of (PipelineWorker, LLMContext). Each WebSocket path adds its
         own greeting handler before passing to WorkerRunner.
     """
-    # Register transfer tool if call_uuid is available
-    transfer_handler = None
+    # Register tools if call_uuid is available
     if call_uuid and fs_api_config:
-        logger.info(f"🔧 Registering transfer tool (queue={fs_api_config.get('queue')})")
-        transfer_handler = create_transfer_tool(
-            call_uuid=call_uuid,
-            api_base_url=fs_api_config["base_url"],
-            api_username=fs_api_config["username"],
-            api_password=fs_api_config["password"],
-            queue_name=fs_api_config.get("queue", "support@default"),
-        )
-        context = LLMContext(tools=[transfer_handler])
+        logger.info(f"Registering tools (queue={fs_api_config.get('queue')})")
+        tools = [
+            create_transfer_tool(
+                call_uuid=call_uuid,
+                api_base_url=fs_api_config["base_url"],
+                api_username=fs_api_config["username"],
+                api_password=fs_api_config["password"],
+                queue_name=fs_api_config.get("queue", "support@default"),
+            ),
+            create_transfer_extension_tool(
+                call_uuid=call_uuid,
+                api_base_url=fs_api_config["base_url"],
+                api_username=fs_api_config["username"],
+                api_password=fs_api_config["password"],
+            ),
+        ]
+        crm_db = get_crm_db()
+        tools.extend(create_crm_tools(crm_db))
+        context = LLMContext(tools=tools)
     else:
         context = LLMContext()
 
@@ -1276,17 +1301,71 @@ async def create_pipeline(
         ),
     )
 
+    # DTMF action callbacks (gắn với handler, dùng API config)
+    async def _dtmf_transfer():
+        """Callback khi DTMF=0: transfer call."""
+        tools = context.tools
+        if tools and call_uuid and fs_api_config:
+            # Gọi transfer logic trực tiếp (không qua LLM)
+            from fs_tools import _get_http_client, _ensure_token, _call_transfer_api, _delayed_stop_audio
+            client = _get_http_client()
+            base_url = fs_api_config["base_url"].rstrip("/")
+            q = fs_api_config.get("queue", "support@default")
+            try:
+                token = await _ensure_token(client, base_url, fs_api_config["username"], fs_api_config["password"])
+                result = await _call_transfer_api(client, base_url, call_uuid, q, token)
+                if result.get("data", {}).get("success"):
+                    logger.info("DTMF: transfer succeeded")
+                    asyncio.create_task(_delayed_stop_audio(
+                        client, base_url, call_uuid, token, 4
+                    ))
+            except Exception as e:
+                logger.error(f"DTMF transfer error: {e}")
+
+    async def _dtmf_end_call():
+        """Callback khi DTMF=#: end call."""
+        from fs_tools import _get_http_client, _ensure_token
+        client = _get_http_client()
+        base_url = fs_api_config["base_url"].rstrip("/")
+        try:
+            token = await _ensure_token(client, base_url, fs_api_config["username"], fs_api_config["password"])
+            resp = await client.post(
+                f"{base_url}/commands",
+                json={"command": "uuid_audio_stream", "args": f"{call_uuid} stop"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            logger.info(f"DTMF: stream stopped for end call: {resp.json()}")
+        except Exception as e:
+            logger.error(f"DTMF end call error: {e}")
+
     pipeline_steps = [
         transport.input(),
         # DebugFrameLogger("1-after-input", capture_on_speech=True, max_captures=3),
-        vad,
+    ]
+    if DTMF_ENABLED:
+        pipeline_steps.append(DTMFDetectorProcessor())          # FFT in-band
+        if call_uuid:                                            # Poll notify queue
+            dtmf_q = asyncio.Queue()
+            _dtmf_queues[call_uuid] = dtmf_q
+            pipeline_steps.append(DTMFPollProcessor(
+                dtmf_queue=dtmf_q, poll_interval=0.3,
+            ))
+    pipeline_steps.append(vad)
+    pipeline_steps.extend([
         # DebugFrameLogger("2-after-vad", capture_on_speech=True, max_captures=3),
         # MinSpeechDurationFilter(),
         stt,
         HallucinationFilter(HALLUCINATION_CONFIG_PATH),
-        # DebugFrameLogger("3-after-stt"),
-        user_agg,
-    ]
+    ])
+    if DTMF_ENABLED and call_uuid:
+        pipeline_steps.append(DTMFAggregator())
+        pipeline_steps.append(DTMFActionHandler(
+            call_uuid=call_uuid,
+            fs_api_config=fs_api_config,
+            do_transfer_cb=_dtmf_transfer if call_uuid else None,
+            do_end_call_cb=_dtmf_end_call if call_uuid else None,
+        ))
+    pipeline_steps.append(user_agg)
 
     # RAGProcessor: chèn kiến thức nội bộ trước mỗi lượt LLM generation
     if knowledge_base is not None and knowledge_base.count() > 0:
@@ -1486,6 +1565,7 @@ async def rtvi_websocket(ws: WebSocket):
             pass
         _chat_queue.pop(f"rtvi-{conn_id}", None)
         _active_connections.discard(f"rtvi-{conn_id}")
+        _dtmf_queues.pop(conversation_id, None)
         logger.info(f"RTVI #{conn_id} cleaned up")
 
 
@@ -1617,6 +1697,8 @@ async def audio_stream(ws: WebSocket):
             pass
         _chat_queue.pop(cid, None)
         _active_connections.discard(cid)
+        # Cleanup DTMF queue
+        _dtmf_queues.pop(conversation_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -1714,6 +1796,62 @@ async def chat_endpoint(data: ChatMessage):
         await q.put(text)
         return {"status": "ok"}
     return {"status": "error", "message": "no active connection"}
+
+
+class DTMFNotification(BaseModel):
+    call_uuid: str = ""
+    digit: str = ""
+
+
+@app.post("/dtmf-notify")
+async def dtmf_notify_endpoint(data: DTMFNotification):
+    """POST /dtmf-notify — receive DTMF digit from FreeSWITCH Lua script.
+
+    Lua script goi endpoint nay khi co phim bam (qua setInputCallback).
+    Khi nhan duoc digit 0 -> transfer truc tiep den queue support@default.
+    """
+    logger.info(f"🔢 DTMF notify: call={data.call_uuid[:8]} digit={data.digit}")
+
+    # Neu digit 0: goi transfer API truc tiep (khong qua pipeline)
+    if data.digit == "0" and data.call_uuid:
+        logger.info(f"🔄 DTMF 0 -> initiating transfer to {FS_API_QUEUE}")
+        asyncio.create_task(_execute_dtmf_transfer(data.call_uuid))
+
+    # Van store vao queue cho pipeline (neu co)
+    q = _dtmf_queues.get(data.call_uuid)
+    if q:
+        await q.put(data.digit)
+
+    return {"success": True}
+
+
+async def _execute_dtmf_transfer(call_uuid: str):
+    """Execute transfer to callcenter queue khi nhan DTMF 0."""
+    from fs_tools import _get_http_client, _ensure_token, _call_transfer_api, _delayed_stop_audio
+    try:
+        client = _get_http_client()
+        base_url = FS_API_BASE_URL.rstrip("/")
+        token = await _ensure_token(client, base_url, FS_API_USERNAME, FS_API_PASSWORD)
+        result = await _call_transfer_api(client, base_url, call_uuid, FS_API_QUEUE, token)
+        if result.get("data", {}).get("success"):
+            logger.info(f"✅ DTMF transfer succeeded: {result}")
+            asyncio.create_task(_delayed_stop_audio(client, base_url, call_uuid, token, 4))
+        else:
+            logger.warning(f"⚠️ DTMF transfer failed: {result}")
+    except Exception as e:
+        logger.error(f"❌ DTMF transfer error: {e}")
+
+
+@app.post("/dtmf-notify/{call_uuid}/{digit}")
+async def dtmf_notify_path(call_uuid: str, digit: str):
+    """POST /dtmf-notify/{call_uuid}/{digit} — path-based variant."""
+    return await dtmf_notify_endpoint(DTMFNotification(call_uuid=call_uuid, digit=digit))
+
+
+@app.get("/dtmf-notify/{call_uuid}/{digit}")
+async def dtmf_notify_get(call_uuid: str, digit: str):
+    """GET /dtmf-notify/{call_uuid}/{digit} — for Lua curl (defaults to GET)."""
+    return await dtmf_notify_endpoint(DTMFNotification(call_uuid=call_uuid, digit=digit))
 
 
 # ---------------------------------------------------------------------------
