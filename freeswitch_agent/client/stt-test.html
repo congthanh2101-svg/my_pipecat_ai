@@ -122,6 +122,13 @@
     </div>
     <div class="file-info" id="recorded-info"></div>
 
+    <div class="or-divider">hoặc</div>
+
+    <div class="card-title">🔗 Dán link YouTube</div>
+    <div class="form-row">
+      <input type="text" id="url-input" placeholder="https://www.youtube.com/watch?v=... hoặc https://youtu.be/...">
+    </div>
+
     <div class="btn-row">
       <button class="btn btn-primary" id="submit-btn" disabled>📝 Chuyển thành text</button>
     </div>
@@ -150,6 +157,7 @@ const modelOptions = document.getElementById('model-options');
 const postprocessToggle = document.getElementById('postprocess-toggle');
 const postprocessCb = document.getElementById('postprocess-cb');
 const postprocessSub = document.getElementById('postprocess-sub');
+const urlInput = document.getElementById('url-input');
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const fileInfo = document.getElementById('file-info');
@@ -237,6 +245,11 @@ function handleFile(file) {
   updateSubmitState();
   hideStatus();
 }
+
+urlInput.addEventListener('input', () => {
+  updateSubmitState();
+  hideStatus();
+});
 
 // ── Recording (tương tự upload-test: chuyển mic → WAV 16kHz mono) ──
 recordBtn.addEventListener('click', async () => {
@@ -351,23 +364,28 @@ function updateTimer() {
 
 // ── Submit state ──
 function updateSubmitState() {
-  submitBtn.disabled = !selectedFile || !selectedModel;
+  submitBtn.disabled = (!selectedFile && !urlInput.value.trim()) || !selectedModel;
 }
 
 // ── Submit ──
 submitBtn.addEventListener('click', async () => {
-  if (!selectedFile || !selectedModel) return;
+  const useUrl = urlInput.value.trim() !== '';
+  if ((!selectedFile && !useUrl) || !selectedModel) return;
 
   submitBtn.disabled = true;
-  showStatus('loading', `⏳ Đang nhận diện bằng ${selectedModel}... (lần đầu có thể mất 10-30s do load model)`);
+  showStatus('loading',
+    useUrl
+      ? `⏳ Đang tải video + nhận diện bằng ${selectedModel}... (video dài có thể mất vài chục giây)`
+      : `⏳ Đang nhận diện bằng ${selectedModel}... (lần đầu có thể mất 10-30s do load model)`);
 
   const formData = new FormData();
-  formData.append('file', selectedFile);
+  if (useUrl) formData.append('url', urlInput.value.trim());
+  else formData.append('file', selectedFile);
   formData.append('model', selectedModel);
   if (postprocessCb.checked) formData.append('postprocess', 'true');
 
   try {
-    const resp = await fetch('/stt', {
+    const resp = await fetch(useUrl ? '/stt/url' : '/stt', {
       method: 'POST',
       body: formData,
     });
@@ -386,7 +404,8 @@ submitBtn.addEventListener('click', async () => {
     timingDiv.textContent =
       `⏱ Model: ${data.model} · Audio: ${data.duration_s}s · Xử lý: ${data.processing_time_s}s` +
       (data.segmented ? ` · ${data.segments.length} đoạn` : '') +
-      (data.postprocess ? ` · ✨ dấu câu/viết hoa` : '');
+      (data.postprocess ? ` · ✨ dấu câu/viết hoa` : '') +
+      (data.source ? ` · 🎬 ${data.source.slice(0, 60)}` : '');
 
     // Render segments với timestamp
     if (data.segments && data.segments.length > 1) {

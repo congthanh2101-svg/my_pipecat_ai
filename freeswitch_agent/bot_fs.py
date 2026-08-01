@@ -257,6 +257,9 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
 OLLAMA_EXTRA = os.getenv("OLLAMA_EXTRA", '{"extra_body": {"options": {"think": false}}}')
 # LLM postprocess cho trang /stt-test: thêm dấu câu, viết hoa, giữ nguyên nội dung
 STT_LLM_MODEL = os.getenv("STT_LLM_MODEL", "qwen3:4b-instruct")
+# Download YouTube cho trang /stt-test (POST /stt/url)
+YTDLP_MAX_FILESIZE = int(os.getenv("YTDLP_MAX_FILESIZE", str(50 * 1024 * 1024)))  # 50MB
+YTDLP_MAX_DURATION = int(os.getenv("YTDLP_MAX_DURATION", "600"))  # 10 phút
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
@@ -2080,38 +2083,14 @@ async def stt_models():
     }
 
 
-@app.post("/stt")
-async def stt_transcribe(
-    file: UploadFile = File(...),
-    model: str = Form("gipformer"),
-    postprocess: bool = Form(False),
-):
-    """Upload voice file → text tiếng Việt (VietASR | Gipformer).
+async def _process_audio_stt(
+    pcm: np.ndarray, duration_s: float, model: str, postprocess: bool,
+) -> dict:
+    """Core STT dùng chung: Silero VAD → STT từng đoạn → ghép transcript → LLM.
 
-    postprocess=True → chạy Qwen3-4B thêm dấu câu, viết hoa, chia đoạn,
-    giữ nguyên nội dung (tùy chọn).
+    Dùng cho cả POST /stt (file/mic) và POST /stt/url (YouTube).
     """
     start = time.monotonic()
-    model = model.lower().strip()
-    if model not in ("gipformer", "vietasr"):
-        raise HTTPException(400, f"Model không hợp lệ: {model}. Chọn 'gipformer' hoặc 'vietasr'")
-    if not _stt_model_available(model):
-        raise HTTPException(503, f"Model {model} chưa có file .onnx trong thư mục model")
-
-    contents = await file.read()
-    if len(contents) > 50 * 1024 * 1024:
-        raise HTTPException(413, "File quá lớn (tối đa 50MB)")
-    if len(contents) < 100:
-        raise HTTPException(400, "File quá nhỏ để nhận diện")
-
-    suffix = Path(file.filename or "").suffix.lower() or ".wav"
-    logger.info(f"🎧 STT: {file.filename} ({len(contents)}B, model={model})")
-
-    # 1. Giải mã → PCM int16 mono 16kHz (ffmpeg)
-    pcm, duration_s = _decode_audio_pcm16(contents, suffix)
-    if len(pcm) < 800:  # ~50ms @ 16kHz
-        raise HTTPException(400, "Audio quá ngắn, không nhận diện được")
-
     loop = asyncio.get_event_loop()
 
     # 2. Silero VAD: chia đoạn theo khoảng lặng (blocking → executor)
@@ -2124,6 +2103,21 @@ async def stt_transcribe(
     if not segments_idx:
         logger.warning("VAD không tìm thấy đoạn nói → dùng toàn bộ audio")
         segments_idx = [{"start": 0, "end": len(pcm)}]
+
+    # Bảo hiểm: hard-cap 25s/đoạn — audio liên tục (nhạc/video) VAD không tách
+    # được, cắt cứng để tránh OOM khi inference segment quá dài
+    MAX_SEG_SAMPLES = 25 * 16000  # 25 giây @ 16kHz
+    capped: list[dict] = []
+    for seg in segments_idx:
+        s, e = seg["start"], seg["end"]
+        if e - s <= MAX_SEG_SAMPLES:
+            capped.append(seg)
+        else:
+            for cs in range(s, e, MAX_SEG_SAMPLES):
+                capped.append({"start": cs, "end": min(cs + MAX_SEG_SAMPLES, e)})
+    if len(capped) != len(segments_idx):
+        logger.warning(f"🔧 Hard-cap: {len(segments_idx)} → {len(capped)} đoạn (max 25s/đoạn)")
+    segments_idx = capped
 
     # 3. STT từng đoạn (mỗi đoạn ngắn → tránh OOM khi audio dài)
     def _infer_segment(seg: dict) -> str:
@@ -2140,7 +2134,11 @@ async def stt_transcribe(
     segments_out: list[dict] = []
     text_parts: list[str] = []
     for seg in segments_idx:
-        raw = await loop.run_in_executor(None, _infer_segment, seg)
+        try:
+            raw = await loop.run_in_executor(None, _infer_segment, seg)
+        except Exception as e:
+            logger.warning(f"⚠️ STT đoạn {seg.get('start')}-{seg.get('end')} thất bại, bỏ qua: {e}")
+            continue
         if not raw:
             continue
         # VietASR/Gipformer output UPPERCASE → câu có hoa đầu
@@ -2187,6 +2185,131 @@ async def stt_transcribe(
         "duration_s": round(duration_s, 2),
         "processing_time_s": round(total, 2),
     }
+
+
+@app.post("/stt")
+async def stt_transcribe(
+    file: UploadFile = File(...),
+    model: str = Form("gipformer"),
+    postprocess: bool = Form(False),
+):
+    """Upload voice file → text tiếng Việt (VietASR | Gipformer).
+
+    postprocess=True → chạy Qwen3-4B thêm dấu câu, viết hoa, chia đoạn,
+    giữ nguyên nội dung (tùy chọn).
+    """
+    model = model.lower().strip()
+    if model not in ("gipformer", "vietasr"):
+        raise HTTPException(400, f"Model không hợp lệ: {model}. Chọn 'gipformer' hoặc 'vietasr'")
+    if not _stt_model_available(model):
+        raise HTTPException(503, f"Model {model} chưa có file .onnx trong thư mục model")
+
+    contents = await file.read()
+    if len(contents) > 50 * 1024 * 1024:
+        raise HTTPException(413, "File quá lớn (tối đa 50MB)")
+    if len(contents) < 100:
+        raise HTTPException(400, "File quá nhỏ để nhận diện")
+
+    suffix = Path(file.filename or "").suffix.lower() or ".wav"
+    logger.info(f"🎧 STT: {file.filename} ({len(contents)}B, model={model})")
+
+    # 1. Giải mã → PCM int16 mono 16kHz (ffmpeg)
+    pcm, duration_s = _decode_audio_pcm16(contents, suffix)
+    if len(pcm) < 800:  # ~50ms @ 16kHz
+        raise HTTPException(400, "Audio quá ngắn, không nhận diện được")
+
+    return await _process_audio_stt(pcm, duration_s, model, postprocess)
+
+
+# ── STT từ link YouTube ────────────────────────────────────────────────────────
+_YOUTUBE_HOSTS = {"youtube.com", "youtu.be", "m.youtube.com",
+                  "music.youtube.com", "youtube-nocookie.com"}
+
+
+def _ytdlp_download_audio(url: str) -> tuple[str, dict]:
+    """Tải bestaudio từ YouTube bằng yt-dlp.
+
+    - Giới hạn: max_filesize, max_duration, no-playlist
+    - Trả về (path_audio, info); file nằm trong thư mục temp (caller tự dọn)
+    """
+    import tempfile
+    import yt_dlp
+
+    outdir = tempfile.mkdtemp(prefix="ytdlp_")
+    common = {
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 15,
+        "retries": 3,
+        "max_filesize": YTDLP_MAX_FILESIZE,
+        "outtmpl": str(Path(outdir) / "audio.%(ext)s"),
+    }
+
+    # Pre-check duration (tránh tải video dài)
+    try:
+        with yt_dlp.YoutubeDL({**common, "skip_download": True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as e:
+        raise HTTPException(502, f"Không lấy được thông tin video: {str(e)[:200]}")
+
+    dur = info.get("duration") or 0
+    if dur > YTDLP_MAX_DURATION:
+        raise HTTPException(400, f"Video quá dài ({dur}s > {YTDLP_MAX_DURATION}s giới hạn)")
+    if not info.get("title"):
+        raise HTTPException(400, "Video không có tiêu đề hợp lệ")
+
+    # Download audio
+    try:
+        with yt_dlp.YoutubeDL(common) as ydl:
+            ydl.extract_info(url, download=True)
+    except yt_dlp.utils.DownloadError as e:
+        raise HTTPException(400, f"yt-dlp tải thất bại: {str(e)[:200]}")
+
+    files = [f for f in Path(outdir).iterdir() if f.is_file()]
+    if not files:
+        raise HTTPException(502, "yt-dlp tải xong nhưng không tìm thấy file audio")
+    return str(files[0]), info
+
+
+@app.post("/stt/url")
+async def stt_transcribe_url(
+    url: str = Form(...),
+    model: str = Form("gipformer"),
+    postprocess: bool = Form(False),
+):
+    """Link YouTube → tải audio → text tiếng Việt (dùng chung core STT)."""
+    import shutil
+    from urllib.parse import urlparse
+
+    model = model.lower().strip()
+    if model not in ("gipformer", "vietasr"):
+        raise HTTPException(400, f"Model không hợp lệ: {model}. Chọn 'gipformer' hoặc 'vietasr'")
+    if not _stt_model_available(model):
+        raise HTTPException(503, f"Model {model} chưa có file .onnx trong thư mục model")
+
+    # SSRF guard: chỉ cho phép link YouTube
+    host = (urlparse(url).netloc or "").lower().replace("www.", "")
+    if host not in _YOUTUBE_HOSTS:
+        raise HTTPException(400, f"Chỉ hỗ trợ link YouTube, nhận được: '{host or url[:40]}'")
+
+    logger.info(f"🎬 STT URL: {url} (model={model}, postprocess={postprocess})")
+
+    loop = asyncio.get_event_loop()
+    audio_path, info = await loop.run_in_executor(None, _ytdlp_download_audio, url)
+    try:
+        suffix = Path(audio_path).suffix.lower() or ".webm"
+        contents = Path(audio_path).read_bytes()
+        pcm, duration_s = _decode_audio_pcm16(contents, suffix)
+        if len(pcm) < 800:
+            raise HTTPException(400, "Audio quá ngắn, không nhận diện được")
+
+        result = await _process_audio_stt(pcm, duration_s, model, postprocess)
+        result["source"] = info.get("title", "")
+        result["source_url"] = url
+        return result
+    finally:
+        shutil.rmtree(Path(audio_path).parent, ignore_errors=True)
 
 
 @app.get("/pipecat-client2")
