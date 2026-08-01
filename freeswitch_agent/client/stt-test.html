@@ -37,6 +37,14 @@
     .form-row { margin-top: 14px; }
     .form-row .label { font-size: 0.8rem; color: #9ca3af; margin-bottom: 6px; }
     .model-options { display: flex; gap: 8px; flex-wrap: wrap; }
+    .postprocess-toggle { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border: 1px solid #2d2d4a; border-radius: 8px; background: #0f0f1a; cursor: pointer; transition: 0.2s; user-select: none; }
+    .postprocess-toggle:hover { border-color: #6366f1; }
+    .postprocess-toggle input { accent-color: #8b5cf6; width: 17px; height: 17px; cursor: pointer; }
+    .postprocess-toggle .label-text { font-size: 0.95rem; font-weight: 500; }
+    .postprocess-toggle .sub { font-size: 0.8rem; color: #9ca3af; }
+    .postprocess-toggle.disabled { opacity: 0.4; cursor: not-allowed; }
+    .postprocess-toggle.disabled input { cursor: not-allowed; }
+
     .model-chip { flex: 1; min-width: 200px; padding: 12px 16px; border: 1px solid #2d2d4a; border-radius: 8px; background: #0f0f1a; color: #e0e0e0; cursor: pointer; transition: 0.2s; text-align: left; }
     .model-chip:hover { border-color: #6366f1; }
     .model-chip.selected { border-color: #6366f1; background: rgba(99,102,241,0.1); }
@@ -88,6 +96,15 @@
       </div>
     </div>
 
+    <div class="card-title" style="margin-top:20px;">Tùy chọn</div>
+    <label class="postprocess-toggle disabled" id="postprocess-toggle">
+      <input type="checkbox" id="postprocess-cb" disabled>
+      <span>
+        <span class="label-text">✨ Dấu câu &amp; Viết hoa</span><br>
+        <span class="sub" id="postprocess-sub">Đang kiểm tra Qwen3-4B...</span>
+      </span>
+    </label>
+
     <div class="card-title" style="margin-top:20px;">Upload file voice</div>
     <div class="upload-zone" id="drop-zone">
       <div class="upload-icon">📂</div>
@@ -130,6 +147,9 @@
 
 <script>
 const modelOptions = document.getElementById('model-options');
+const postprocessToggle = document.getElementById('postprocess-toggle');
+const postprocessCb = document.getElementById('postprocess-cb');
+const postprocessSub = document.getElementById('postprocess-sub');
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const fileInfo = document.getElementById('file-info');
@@ -160,6 +180,17 @@ async function loadModels() {
     const data = await resp.json();
     const models = data.models || [];
     modelOptions.innerHTML = '';
+
+    // LLM postprocess (dấu câu & viết hoa)
+    if (data.postprocess && data.postprocess.available) {
+      postprocessToggle.classList.remove('disabled');
+      postprocessCb.disabled = false;
+      postprocessSub.textContent = `Qwen3-4B · dấu câu, viết hoa, chia đoạn, giữ nội dung`;
+    } else {
+      postprocessCb.checked = false;
+      postprocessSub.textContent = 'Không khả dụng (thiếu Qwen3-4B trên Ollama)';
+    }
+
     models.forEach(m => {
       const chip = document.createElement('div');
       chip.className = 'model-chip' + (m.available ? '' : ' disabled');
@@ -333,6 +364,7 @@ submitBtn.addEventListener('click', async () => {
   const formData = new FormData();
   formData.append('file', selectedFile);
   formData.append('model', selectedModel);
+  if (postprocessCb.checked) formData.append('postprocess', 'true');
 
   try {
     const resp = await fetch('/stt', {
@@ -350,10 +382,11 @@ submitBtn.addEventListener('click', async () => {
 
     resultCard.classList.remove('hidden');
     resultText.textContent = data.text || '(không nhận diện được giọng nói)';
-    showStatus('success', '✅ Nhận diện thành công!');
+    showStatus('success', '✅ Nhận diện thành công!' + (data.postprocess ? ' (đã định dạng bằng Qwen3-4B)' : ''));
     timingDiv.textContent =
       `⏱ Model: ${data.model} · Audio: ${data.duration_s}s · Xử lý: ${data.processing_time_s}s` +
-      (data.segmented ? ` · ${data.segments.length} đoạn` : '');
+      (data.segmented ? ` · ${data.segments.length} đoạn` : '') +
+      (data.postprocess ? ` · ✨ dấu câu/viết hoa` : '');
 
     // Render segments với timestamp
     if (data.segments && data.segments.length > 1) {

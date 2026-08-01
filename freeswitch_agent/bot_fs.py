@@ -255,6 +255,8 @@ GIPFORMER_PROVIDER = os.getenv("GIPFORMER_PROVIDER", "cuda")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
 OLLAMA_EXTRA = os.getenv("OLLAMA_EXTRA", '{"extra_body": {"options": {"think": false}}}')
+# LLM postprocess cho trang /stt-test: thêm dấu câu, viết hoa, giữ nguyên nội dung
+STT_LLM_MODEL = os.getenv("STT_LLM_MODEL", "qwen3:4b-instruct")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
@@ -1923,6 +1925,103 @@ def _vad_segments(pcm: np.ndarray, sample_rate: int = 16000) -> list[dict]:
     return [{"start": int(s["start"]), "end": int(s["end"])} for s in segs]
 
 
+def _stt_llm_available() -> bool:
+    """Kiểm tra Ollama có model STT_LLM_MODEL (Qwen3-4B) không."""
+    base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    try:
+        import httpx as _httpx
+        with _httpx.Client(timeout=2.0) as client:
+            resp = client.get(f"{base}/models")
+            resp.raise_for_status()
+            return any(m.get("id") == STT_LLM_MODEL for m in resp.json().get("data", []))
+    except Exception:
+        return False
+
+
+def _llm_format_segments(segments_text: list[str]) -> list[str]:
+    """Qwen3-4B: thêm dấu câu, viết hoa, chia đoạn, GIỮ NGUYÊN nội dung.
+
+    - Prompt yêu cầu output dạng 'STT. nội dung' → parse theo index (map bền
+      kể cả khi model gộp/thiếu dòng).
+    - Luôn trả về ĐÚNG len(segments_text) dòng: ô thiếu → giữ input gốc,
+      dòng thiếu dấu câu → tự thêm '.' (safety net).
+    - Lowercase input để model luôn áp dụng định dạng.
+    """
+    n = len(segments_text)
+    if n == 0:
+        return []
+    client = OpenAI(
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+        api_key="ollama",
+        timeout=60,
+    )
+    numbered_in = "\n".join(f"{i + 1}. {t.strip().lower()}" for i, t in enumerate(segments_text))
+    prompt = (
+        "Bạn là công cụ định dạng transcript tiếng Việt:\n"
+        "- THÊM dấu câu vào mỗi câu (., ? hoặc !)\n"
+        "- VIẾT HOA đầu câu\n"
+        "- GIỮ NGUYÊN 100% từ ngữ (không thêm/bớt/sửa từ)\n"
+        f"- Trả về ĐÚNG {n} dòng, mỗi dòng bắt đầu bằng số thứ tự.\n\n"
+        "Ví dụ:\nInput:\n1. hôm nay trời đẹp quá\n2. bạn có khỏe không\n"
+        "Output:\n1. Hôm nay trời đẹp quá.\n2. Bạn có khỏe không?\n\n"
+        f"Giờ làm tương tự với {n} dòng dưới đây, "
+        f"trả về ĐÚNG {n} dòng dạng 'STT. Nội dung đã định dạng':\n{numbered_in}"
+    )
+    resp = client.chat.completions.create(
+        model=STT_LLM_MODEL,
+        messages=[
+            {"role": "system",
+             "content": "Bạn là công cụ định dạng transcript tiếng Việt, "
+                        "giữ nguyên 100% từ ngữ."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.0,
+        max_tokens=2000,
+        extra_body={"options": {"think": False}},
+    )
+    content = resp.choices[0].message.content or ""
+
+    # Parse output dạng 'STT. nội dung' → map theo index
+    result: list[str | None] = [None] * n
+    orphans: list[str] = []  # dòng không bắt đầu bằng số
+    for ln in content.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        m = re.match(r"^(\d+)\s*[.)]\s*(.*)$", ln)
+        if m:
+            idx = int(m.group(1)) - 1
+            txt = m.group(2).strip()
+            if 0 <= idx < n and txt:
+                result[idx] = txt
+        else:
+            orphans.append(ln)
+
+    # Dòng không có số → điền vào ô trống theo thứ tự
+    for txt in orphans:
+        for i in range(n):
+            if result[i] is None:
+                result[i] = txt
+                break
+
+    # Fill ô còn thiếu bằng input gốc (sentence-case) + đảm bảo dấu câu cuối
+    formatted = 0
+    out: list[str] = []
+    for i in range(n):
+        txt = result[i]
+        if txt is None:
+            txt = segments_text[i].strip().lower()
+            txt = txt[0].upper() + txt[1:] if len(txt) > 1 else txt.upper()
+        else:
+            formatted += 1
+        if txt and txt[-1] not in ".,!?;:…":
+            txt += "."
+        out.append(txt)
+
+    logger.info(f"✨ LLM postprocess: {n} segments → {formatted}/{n} formatted")
+    return out
+
+
 def _decode_audio_pcm16(data: bytes, suffix: str) -> tuple[np.ndarray, float]:
     """Giải mã audio bất kỳ (wav/mp3/ogg/m4a/...) → int16 PCM mono 16kHz.
 
@@ -1963,7 +2062,7 @@ async def stt_test_ui():
 
 @app.get("/stt/models")
 async def stt_models():
-    """Danh sách model STT có sẵn (Gipformer mặc định, VietASR)."""
+    """Danh sách model STT có sẵn (Gipformer mặc định, VietASR) + LLM postprocess."""
     return {
         "models": [
             {
@@ -1973,13 +2072,25 @@ async def stt_models():
                 "available": _stt_model_available(m["name"]),
             }
             for m in _STT_MODELS_META
-        ]
+        ],
+        "postprocess": {
+            "available": _stt_llm_available(),
+            "model": STT_LLM_MODEL,
+        },
     }
 
 
 @app.post("/stt")
-async def stt_transcribe(file: UploadFile = File(...), model: str = Form("gipformer")):
-    """Upload voice file → text tiếng Việt (VietASR | Gipformer)."""
+async def stt_transcribe(
+    file: UploadFile = File(...),
+    model: str = Form("gipformer"),
+    postprocess: bool = Form(False),
+):
+    """Upload voice file → text tiếng Việt (VietASR | Gipformer).
+
+    postprocess=True → chạy Qwen3-4B thêm dấu câu, viết hoa, chia đoạn,
+    giữ nguyên nội dung (tùy chọn).
+    """
     start = time.monotonic()
     model = model.lower().strip()
     if model not in ("gipformer", "vietasr"):
@@ -2045,14 +2156,34 @@ async def stt_transcribe(file: UploadFile = File(...), model: str = Form("gipfor
     # 4. Ghép transcript: mỗi đoạn = 1 câu (thêm dấu câu)
     text = ". ".join(text_parts) + "." if text_parts else ""
 
+    # 5. LLM postprocess (tùy chọn): thêm dấu câu, viết hoa, chia đoạn, giữ nội dung
+    # Truyền RAW text (chưa có dấu câu) để LLM tự quyết định . / ? / !
+    llm_used = False
+    if postprocess and text_parts:
+        try:
+            def _format(parts: list[str]) -> list[str]:
+                return _llm_format_segments(parts)
+
+            formatted = await loop.run_in_executor(None, _format, text_parts)
+            # _llm_format_segments luôn trả đúng len(segments_out) dòng
+            if formatted and len(formatted) == len(segments_out):
+                for seg, line in zip(segments_out, formatted):
+                    seg["text"] = line
+                text = " ".join(s["text"] for s in segments_out)
+                llm_used = True
+        except Exception as e:
+            logger.warning(f"⚠️ LLM postprocess thất bại, giữ transcript gốc: {e}")
+
     total = time.monotonic() - start
-    logger.info(f"✅ STT done ({model}) in {total:.2f}s: {len(segments_out)} segments → {text[:100]!r}")
+    logger.info(f"✅ STT done ({model}) in {total:.2f}s: {len(segments_out)} segments "
+                f"(llm={llm_used}) → {text[:100]!r}")
     return {
         "success": bool(text),
         "model": model,
         "text": text,
         "segments": segments_out,
         "segmented": len(segments_idx) > 1,
+        "postprocess": llm_used,
         "duration_s": round(duration_s, 2),
         "processing_time_s": round(total, 2),
     }
