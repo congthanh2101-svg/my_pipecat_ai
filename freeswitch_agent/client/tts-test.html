@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TTS Test - Text to Voice</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0f0f1a; color: #e0e0e0; min-height: 100vh; display: flex; justify-content: center; padding: 20px; }
+    .container { max-width: 720px; width: 100%; }
+    h1 { font-size: 1.5rem; margin: 20px 0; color: #fff; }
+    .card { background: #1a1a2e; border: 1px solid #2d2d4a; border-radius: 12px; padding: 24px; margin-bottom: 16px; }
+    .card-title { font-size: 1rem; font-weight: 600; margin-bottom: 16px; color: #a5b4fc; }
+
+    textarea { width: 100%; background: #0f0f1a; border: 1px solid #2d2d4a; border-radius: 8px; color: #e0e0e0; padding: 12px; font-size: 0.95rem; font-family: inherit; min-height: 110px; resize: vertical; outline: none; transition: 0.2s; }
+    textarea:focus { border-color: #6366f1; }
+
+    .form-row { margin-top: 14px; }
+    .form-row .label { font-size: 0.8rem; color: #9ca3af; margin-bottom: 6px; }
+    select, input[type="text"] { width: 100%; background: #0f0f1a; border: 1px solid #2d2d4a; border-radius: 8px; color: #e0e0e0; padding: 10px 12px; font-size: 0.95rem; outline: none; transition: 0.2s; }
+    select:focus, input[type="text"]:focus { border-color: #6366f1; }
+
+    .sample-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .sample-chip { padding: 6px 12px; border: 1px solid #2d2d4a; border-radius: 20px; background: transparent; color: #9ca3af; font-size: 0.85rem; cursor: pointer; transition: 0.2s; }
+    .sample-chip:hover { border-color: #6366f1; color: #a5b4fc; background: rgba(99,102,241,0.08); }
+
+    .btn { padding: 10px 24px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 0.95rem; transition: 0.2s; }
+    .btn-primary { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff; }
+    .btn-primary:hover { opacity: 0.9; }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-row { margin-top: 16px; display: flex; gap: 8px; align-items: center; }
+
+    .status { margin-top: 12px; padding: 12px; border-radius: 8px; display: none; }
+    .status.show { display: block; }
+    .status.loading { background: rgba(99,102,241,0.1); border: 1px solid #6366f1; }
+    .status.success { background: rgba(34,197,94,0.1); border: 1px solid #22c55e; }
+    .status.error { background: rgba(239,68,68,0.1); border: 1px solid #ef4444; }
+    .status .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #6366f1; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 8px; vertical-align: middle; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .result-section { margin-top: 16px; }
+    .result-section .label { font-size: 0.8rem; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+    .result-section .value.audio-player { background: #0f0f1a; padding: 10px 12px; border-radius: 6px; }
+    .result-section .value.audio-player audio { width: 100%; }
+    .timing { font-size: 0.8rem; color: #6b7280; margin-top: 8px; }
+    .download-link { display: inline-block; margin-top: 10px; font-size: 0.9rem; color: #a5b4fc; text-decoration: none; }
+    .download-link:hover { text-decoration: underline; }
+
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>🎙️ Test TTS — Text → Voice</h1>
+
+  <div class="card">
+    <div class="card-title">Nội dung cần đọc</div>
+    <textarea id="text-input" placeholder="Nhập text cần chuyển thành giọng nói... (tiếng Việt hoặc tiếng Anh)"></textarea>
+
+    <div class="sample-row">
+      <button class="sample-chip" data-sample="Xin chào! Tôi là trợ lý ảo của công ty. Rất vui được hỗ trợ bạn.">👋 Xin chào</button>
+      <button class="sample-chip" data-sample="Bây giờ là mười giờ ba mươi phút sáng.">⏰ Báo giờ</button>
+      <button class="sample-chip" data-sample="Cảm ơn bạn đã gọi đến tổng đài. Nhân viên sẽ hỗ trợ bạn ngay.">📞 Tổng đài</button>
+      <button class="sample-chip" data-sample="Hello! Welcome to our company. How can I help you today?">🇬🇧 English</button>
+    </div>
+
+    <div class="form-row">
+      <div class="label">Giọng đọc</div>
+      <select id="voice-select" disabled>
+        <option value="">Đang tải danh sách giọng đọc...</option>
+      </select>
+    </div>
+
+    <div class="form-row">
+      <div class="label">Ngôn ngữ</div>
+      <select id="language-select">
+        <option value="vi">Tiếng Việt (vi)</option>
+        <option value="en">English (en)</option>
+        <option value="">Tự động</option>
+      </select>
+    </div>
+
+    <div class="form-row">
+      <div class="label">Hướng dẫn giọng đọc (tuỳ chọn, vd: "female, gentle tone")</div>
+      <input type="text" id="instruct-input" placeholder="Để trống nếu không cần">
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" id="submit-btn" disabled>✨ Tạo giọng đọc</button>
+    </div>
+
+    <div class="status" id="status"></div>
+  </div>
+
+  <div class="card hidden" id="result-card">
+    <div class="card-title">Kết quả</div>
+
+    <div class="result-section">
+      <div class="label">🔊 Audio</div>
+      <div class="value audio-player" id="audio-container"></div>
+      <a class="download-link hidden" id="download-link" download="tts_output.wav">⬇ Tải xuống WAV</a>
+    </div>
+
+    <div class="timing" id="timing"></div>
+  </div>
+</div>
+
+<script>
+const textInput = document.getElementById('text-input');
+const voiceSelect = document.getElementById('voice-select');
+const languageSelect = document.getElementById('language-select');
+const instructInput = document.getElementById('instruct-input');
+const submitBtn = document.getElementById('submit-btn');
+const statusDiv = document.getElementById('status');
+const resultCard = document.getElementById('result-card');
+const audioContainer = document.getElementById('audio-container');
+const timingDiv = document.getElementById('timing');
+const downloadLink = document.getElementById('download-link');
+
+let voices = [];
+let currentAudioBase64 = null;
+
+// ── Sample texts ──
+document.querySelectorAll('.sample-chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    textInput.value = chip.dataset.sample;
+    textInput.focus();
+    hideStatus();
+  });
+});
+
+// ── Load voices ──
+async function loadVoices() {
+  try {
+    const resp = await fetch('/tts/voices');
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || ('HTTP ' + resp.status));
+    }
+    const data = await resp.json();
+    voices = data.voices || [];
+
+    voiceSelect.innerHTML = '';
+    voices.forEach(v => {
+      const opt = document.createElement('option');
+      opt.value = v.name;
+      const meta = [v.gender, v.language, v.description].filter(Boolean).join(' · ');
+      opt.textContent = v.name + (meta ? ' — ' + meta : '');
+      voiceSelect.appendChild(opt);
+    });
+
+    if (voices.length === 0) {
+      voiceSelect.innerHTML = '<option value="">Không có giọng đọc nào</option>';
+      voiceSelect.disabled = true;
+      submitBtn.disabled = true;
+      showStatus('error', 'Không tìm thấy giọng đọc nào trên server.');
+      return;
+    }
+
+    voiceSelect.disabled = false;
+    updateSubmitState();
+    showStatus('success', `✅ Tải xong ${voices.length} giọng đọc. Chọn giọng và nhập text để bắt đầu.`);
+  } catch (e) {
+    voiceSelect.innerHTML = '<option value="">Không tải được danh sách giọng đọc</option>';
+    voiceSelect.disabled = true;
+    submitBtn.disabled = true;
+    showStatus('error', 'Lỗi tải danh sách giọng đọc: ' + e.message);
+  }
+}
+
+// ── Submit state ──
+function updateSubmitState() {
+  submitBtn.disabled = !textInput.value.trim() || voiceSelect.disabled;
+}
+
+textInput.addEventListener('input', () => {
+  updateSubmitState();
+  hideStatus();
+});
+
+// ── Submit ──
+submitBtn.addEventListener('click', async () => {
+  const text = textInput.value.trim();
+  const voiceName = voiceSelect.value;
+  if (!text || !voiceName) return;
+
+  submitBtn.disabled = true;
+  showStatus('loading', '⏳ Đang tạo giọng đọc... (lần đầu có thể mất 30-60s do load model)');
+
+  const body = { text, voice_name: voiceName };
+  if (languageSelect.value) body.language = languageSelect.value;
+  if (instructInput.value.trim()) body.instruct = instructInput.value.trim();
+
+  try {
+    const resp = await fetch('/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+
+    if (!resp.ok || !data.success) {
+      showStatus('error', data.detail || data.error || ('HTTP ' + resp.status));
+      submitBtn.disabled = false;
+      updateSubmitState();
+      return;
+    }
+
+    currentAudioBase64 = data.audio_base64;
+    const wavSrc = 'data:audio/wav;base64,' + data.audio_base64;
+    audioContainer.innerHTML = `<audio controls src="${wavSrc}"></audio>`;
+
+    downloadLink.href = wavSrc;
+    downloadLink.download = `tts_${voiceName}_${Date.now()}.wav`;
+    downloadLink.classList.remove('hidden');
+
+    resultCard.classList.remove('hidden');
+    showStatus('success', '✅ Tạo thành công!');
+
+    timingDiv.textContent =
+      `⏱ Xử lý: ${data.processing_time_s}s · Giọng: ${voiceName}` +
+      (data.duration_s ? ` · Thời lượng: ${data.duration_s}s` : '');
+  } catch (e) {
+    showStatus('error', 'Lỗi kết nối: ' + e.message);
+  }
+
+  updateSubmitState();
+});
+
+// ── UI helpers ──
+function showStatus(type, msg) {
+  statusDiv.className = 'status show ' + type;
+  if (type === 'loading') {
+    statusDiv.innerHTML = `<span class="spinner"></span> ${msg}`;
+  } else {
+    statusDiv.textContent = msg;
+  }
+}
+
+function hideStatus() {
+  statusDiv.className = 'status';
+}
+
+// ── Init ──
+loadVoices();
+</script>
+</body>
+</html>

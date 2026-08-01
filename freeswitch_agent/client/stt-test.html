@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>STT Test - Voice to Text</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0f0f1a; color: #e0e0e0; min-height: 100vh; display: flex; justify-content: center; padding: 20px; }
+    .container { max-width: 720px; width: 100%; }
+    h1 { font-size: 1.5rem; margin: 20px 0; color: #fff; }
+    .card { background: #1a1a2e; border: 1px solid #2d2d4a; border-radius: 12px; padding: 24px; margin-bottom: 16px; }
+    .card-title { font-size: 1rem; font-weight: 600; margin-bottom: 16px; color: #a5b4fc; }
+
+    .upload-zone { border: 2px dashed #2d2d4a; border-radius: 8px; padding: 32px; text-align: center; cursor: pointer; transition: 0.2s; }
+    .upload-zone:hover, .upload-zone.dragover { border-color: #6366f1; background: rgba(99,102,241,0.08); }
+    .upload-zone.has-file { border-color: #22c55e; background: rgba(34,197,94,0.05); }
+    .upload-icon { font-size: 2rem; margin-bottom: 8px; }
+    .upload-text { color: #9ca3af; font-size: 0.9rem; }
+    .upload-text strong { color: #e0e0e0; }
+    .file-info { display: none; margin-top: 12px; padding: 8px 12px; background: #0f0f1a; border-radius: 6px; font-size: 0.85rem; color: #9ca3af; }
+    .file-info.show { display: block; }
+
+    .btn { padding: 10px 24px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 0.95rem; transition: 0.2s; }
+    .btn-primary { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff; }
+    .btn-primary:hover { opacity: 0.9; }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-row { margin-top: 16px; display: flex; gap: 8px; align-items: center; }
+
+    .recorder-bar { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+    .recorder-bar .btn { flex-shrink: 0; }
+    .record-timer { font-size: 0.9rem; color: #9ca3af; font-variant-numeric: tabular-nums; }
+    .record-timer.recording { color: #ef4444; }
+    #record-btn.recording { background: #ef4444; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+    .form-row { margin-top: 14px; }
+    .form-row .label { font-size: 0.8rem; color: #9ca3af; margin-bottom: 6px; }
+    .model-options { display: flex; gap: 8px; flex-wrap: wrap; }
+    .model-chip { flex: 1; min-width: 200px; padding: 12px 16px; border: 1px solid #2d2d4a; border-radius: 8px; background: #0f0f1a; color: #e0e0e0; cursor: pointer; transition: 0.2s; text-align: left; }
+    .model-chip:hover { border-color: #6366f1; }
+    .model-chip.selected { border-color: #6366f1; background: rgba(99,102,241,0.1); }
+    .model-chip .model-name { font-weight: 600; font-size: 0.95rem; }
+    .model-chip .model-desc { font-size: 0.8rem; color: #9ca3af; margin-top: 2px; }
+    .model-chip.disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .status { margin-top: 12px; padding: 12px; border-radius: 8px; display: none; }
+    .status.show { display: block; }
+    .status.loading { background: rgba(99,102,241,0.1); border: 1px solid #6366f1; }
+    .status.success { background: rgba(34,197,94,0.1); border: 1px solid #22c55e; }
+    .status.error { background: rgba(239,68,68,0.1); border: 1px solid #ef4444; }
+    .status .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #6366f1; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 8px; vertical-align: middle; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .result-section { margin-top: 16px; }
+    .result-section .label { font-size: 0.8rem; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+    .result-section .value { background: #0f0f1a; padding: 12px; border-radius: 6px; font-size: 1.05rem; line-height: 1.6; white-space: pre-wrap; word-break: break-word; color: #fff; }
+    .timing { font-size: 0.8rem; color: #6b7280; margin-top: 8px; }
+
+    .segments { margin-top: 4px; display: flex; flex-direction: column; gap: 6px; }
+    .segment { display: flex; gap: 10px; background: #0f0f1a; border: 1px solid #2d2d4a; border-radius: 6px; padding: 8px 12px; align-items: flex-start; }
+    .segment-time { font-size: 0.75rem; color: #6366f1; font-variant-numeric: tabular-nums; white-space: nowrap; padding-top: 2px; min-width: 108px; }
+    .segment-text { font-size: 0.95rem; color: #e0e0e0; line-height: 1.5; }
+
+    .hidden { display: none; }
+    input[type="file"] { display: none; }
+
+    .or-divider { text-align: center; color: #4a5568; font-size: 0.85rem; margin: 16px 0; position: relative; }
+    .or-divider::before, .or-divider::after { content: ''; position: absolute; top: 50%; width: 40%; height: 1px; background: #2d2d4a; }
+    .or-divider::before { left: 0; }
+    .or-divider::after { right: 0; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>🗣️ Test STT — Voice → Text tiếng Việt</h1>
+
+  <div class="card">
+    <div class="card-title">Model nhận diện giọng nói</div>
+    <div class="model-options" id="model-options">
+      <div class="model-chip" data-model="gipformer">
+        <div class="model-name">🔊 Gipformer</div>
+        <div class="model-desc">Zipformer · mặc định · FS Bot</div>
+      </div>
+      <div class="model-chip" data-model="vietasr">
+        <div class="model-name">🎯 VietASR</div>
+        <div class="model-desc">Zipformer · tiếng Việt</div>
+      </div>
+    </div>
+
+    <div class="card-title" style="margin-top:20px;">Upload file voice</div>
+    <div class="upload-zone" id="drop-zone">
+      <div class="upload-icon">📂</div>
+      <div class="upload-text">Kéo thả file (.wav, .mp3, .ogg, .m4a...) vào đây, hoặc <strong>nhấp để chọn</strong></div>
+      <div class="file-info" id="file-info"></div>
+    </div>
+    <input type="file" id="file-input" accept=".wav,.mp3,.ogg,.m4a,.flac,.aac,audio/*">
+
+    <div class="or-divider">hoặc</div>
+
+    <div class="card-title">Ghi âm trực tiếp</div>
+    <div class="recorder-bar">
+      <button class="btn btn-primary" id="record-btn">🎤 Ghi âm</button>
+      <span class="record-timer" id="record-timer">00:00</span>
+    </div>
+    <div class="file-info" id="recorded-info"></div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" id="submit-btn" disabled>📝 Chuyển thành text</button>
+    </div>
+
+    <div class="status" id="status"></div>
+  </div>
+
+  <div class="card hidden" id="result-card">
+    <div class="card-title">Kết quả nhận diện</div>
+    <div class="result-section">
+      <div class="label">📝 Văn bản</div>
+      <div class="value" id="result-text"></div>
+    </div>
+
+    <div class="result-section hidden" id="segments-section">
+      <div class="label">📑 Đoạn theo khoảng lặng <span id="segments-count"></span></div>
+      <div class="segments" id="segments-container"></div>
+    </div>
+
+    <div class="timing" id="timing"></div>
+  </div>
+</div>
+
+<script>
+const modelOptions = document.getElementById('model-options');
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+const fileInfo = document.getElementById('file-info');
+const submitBtn = document.getElementById('submit-btn');
+const statusDiv = document.getElementById('status');
+const resultCard = document.getElementById('result-card');
+const resultText = document.getElementById('result-text');
+const timingDiv = document.getElementById('timing');
+const segmentsSection = document.getElementById('segments-section');
+const segmentsContainer = document.getElementById('segments-container');
+const segmentsCount = document.getElementById('segments-count');
+
+const recordBtn = document.getElementById('record-btn');
+const recordTimer = document.getElementById('record-timer');
+const recordedInfo = document.getElementById('recorded-info');
+
+let selectedModel = null;
+let selectedFile = null;
+let mediaRecorder = null;
+let recordingChunks = [];
+let recordingStartTime = null;
+let recordingTimer = null;
+
+// ── Load models ──
+async function loadModels() {
+  try {
+    const resp = await fetch('/stt/models');
+    const data = await resp.json();
+    const models = data.models || [];
+    modelOptions.innerHTML = '';
+    models.forEach(m => {
+      const chip = document.createElement('div');
+      chip.className = 'model-chip' + (m.available ? '' : ' disabled');
+      chip.dataset.model = m.name;
+      chip.innerHTML = `<div class="model-name">${m.label.split(' ')[0]} ${m.default ? '· mặc định' : ''}</div>
+                        <div class="model-desc">${m.label}</div>`;
+      chip.addEventListener('click', () => selectModel(m.name, chip));
+      modelOptions.appendChild(chip);
+      if (m.default && m.available) selectModel(m.name, chip);
+    });
+    if (!selectedModel) showStatus('error', 'Không có model nào khả dụng.');
+  } catch (e) {
+    showStatus('error', 'Lỗi tải danh sách model: ' + e.message);
+  }
+}
+
+function selectModel(name, chip) {
+  if (chip && chip.classList.contains('disabled')) return;
+  selectedModel = name;
+  document.querySelectorAll('.model-chip').forEach(c => c.classList.remove('selected'));
+  if (chip) chip.classList.add('selected');
+}
+
+// ── Drag & drop ──
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  const files = e.dataTransfer.files;
+  if (files.length > 0) handleFile(files[0]);
+});
+
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length > 0) handleFile(fileInput.files[0]);
+});
+
+function handleFile(file) {
+  selectedFile = file;
+  dropZone.classList.add('has-file');
+  fileInfo.textContent = `📄 ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+  fileInfo.classList.add('show');
+  updateSubmitState();
+  hideStatus();
+}
+
+// ── Recording (tương tự upload-test: chuyển mic → WAV 16kHz mono) ──
+recordBtn.addEventListener('click', async () => {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    stopRecording();
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    startRecording(stream);
+  } catch (e) {
+    showStatus('error', 'Không thể truy cập microphone: ' + e.message);
+  }
+});
+
+function startRecording(stream) {
+  recordingChunks = [];
+  mediaRecorder = new MediaRecorder(stream, {
+    mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4',
+  });
+
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data.size > 0) recordingChunks.push(e.data);
+  };
+
+  mediaRecorder.onstop = async () => {
+    stream.getTracks().forEach(t => t.stop());
+
+    const blob = new Blob(recordingChunks);
+    try {
+      const arrayBuffer = await blob.arrayBuffer();
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+      // Convert to mono 16000Hz WAV
+      const srcRate = audioBuffer.sampleRate;
+      const srcData = audioBuffer.getChannelData(0);
+      const targetRate = 16000;
+      const ratio = targetRate / srcRate;
+      const dstLen = Math.round(srcData.length * ratio);
+      const dstData = new Float32Array(dstLen);
+
+      for (let i = 0; i < dstLen; i++) {
+        const srcIdx = i / ratio;
+        const lo = Math.floor(srcIdx);
+        const hi = Math.min(lo + 1, srcData.length - 1);
+        const frac = srcIdx - lo;
+        dstData[i] = srcData[lo] * (1 - frac) + srcData[hi] * frac;
+      }
+
+      const int16 = new Int16Array(dstLen);
+      for (let i = 0; i < dstLen; i++) {
+        const s = Math.max(-1, Math.min(1, dstData[i]));
+        int16[i] = s < 0 ? s * 32768 : s * 32767;
+      }
+
+      // Build WAV header
+      const wavHeader = new ArrayBuffer(44);
+      const dv = new DataView(wavHeader);
+      dv.setUint32(0, 0x52494646, false); // RIFF
+      dv.setUint32(4, 36 + dstLen * 2, true);
+      dv.setUint32(8, 0x57415645, false); // WAVE
+      dv.setUint32(12, 0x666D7420, false); // fmt
+      dv.setUint32(16, 16, true);
+      dv.setUint16(20, 1, true); // PCM
+      dv.setUint16(22, 1, true); // mono
+      dv.setUint32(24, targetRate, true);
+      dv.setUint32(28, targetRate * 2, true);
+      dv.setUint16(32, 2, true);
+      dv.setUint16(34, 16, true);
+      dv.setUint32(36, 0x64617461, false); // data
+      dv.setUint32(40, dstLen * 2, true);
+
+      const wavBlob = new Blob([wavHeader, int16.buffer]);
+      const fileName = `recording_${Date.now()}.wav`;
+
+      selectedFile = new File([wavBlob], fileName, { type: 'audio/wav' });
+      recordedInfo.textContent = `🎤 ${fileName} (${(selectedFile.size / 1024).toFixed(1)} KB, ${targetRate}Hz)`;
+      recordedInfo.classList.add('show');
+      updateSubmitState();
+      showStatus('success', 'Ghi âm thành công! Nhấn "Chuyển thành text" để nhận diện.');
+    } catch (e) {
+      showStatus('error', 'Lỗi xử lý audio: ' + e.message);
+    }
+  };
+
+  mediaRecorder.start();
+  recordBtn.textContent = '⏹ Dừng';
+  recordBtn.classList.add('recording');
+  recordingStartTime = Date.now();
+  recordingTimer = setInterval(updateTimer, 100);
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+    recordBtn.textContent = '🎤 Ghi âm';
+    recordBtn.classList.remove('recording');
+    clearInterval(recordingTimer);
+    recordingTimer = null;
+  }
+}
+
+function updateTimer() {
+  if (!recordingStartTime) return;
+  const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+  const m = String(Math.floor(elapsed / 60)).padStart(2, '0');
+  const s = String(elapsed % 60).padStart(2, '0');
+  recordTimer.textContent = `${m}:${s}`;
+  recordTimer.classList.add('recording');
+}
+
+// ── Submit state ──
+function updateSubmitState() {
+  submitBtn.disabled = !selectedFile || !selectedModel;
+}
+
+// ── Submit ──
+submitBtn.addEventListener('click', async () => {
+  if (!selectedFile || !selectedModel) return;
+
+  submitBtn.disabled = true;
+  showStatus('loading', `⏳ Đang nhận diện bằng ${selectedModel}... (lần đầu có thể mất 10-30s do load model)`);
+
+  const formData = new FormData();
+  formData.append('file', selectedFile);
+  formData.append('model', selectedModel);
+
+  try {
+    const resp = await fetch('/stt', {
+      method: 'POST',
+      body: formData,
+    });
+    const data = await resp.json();
+
+    if (!resp.ok || !data.success) {
+      showStatus('error', data.detail || data.error || ('HTTP ' + resp.status));
+      submitBtn.disabled = false;
+      updateSubmitState();
+      return;
+    }
+
+    resultCard.classList.remove('hidden');
+    resultText.textContent = data.text || '(không nhận diện được giọng nói)';
+    showStatus('success', '✅ Nhận diện thành công!');
+    timingDiv.textContent =
+      `⏱ Model: ${data.model} · Audio: ${data.duration_s}s · Xử lý: ${data.processing_time_s}s` +
+      (data.segmented ? ` · ${data.segments.length} đoạn` : '');
+
+    // Render segments với timestamp
+    if (data.segments && data.segments.length > 1) {
+      segmentsSection.classList.remove('hidden');
+      segmentsCount.textContent = `(${data.segments.length})`;
+      segmentsContainer.innerHTML = data.segments.map(s =>
+        `<div class="segment">
+           <span class="segment-time">[${fmtTime(s.start_s)} – ${fmtTime(s.end_s)}]</span>
+           <span class="segment-text">${escapeHtml(s.text)}</span>
+         </div>`
+      ).join('');
+    } else {
+      segmentsSection.classList.add('hidden');
+    }
+  } catch (e) {
+    showStatus('error', 'Lỗi kết nối: ' + e.message);
+  }
+
+  updateSubmitState();
+});
+
+// ── UI helpers ──
+function fmtTime(sec) {
+  const m = Math.floor(sec / 60);
+  const s = sec - m * 60;
+  return `${m}:${s < 10 ? '0' : ''}${s.toFixed(1)}`;
+}
+
+function escapeHtml(str) {
+  return String(str || '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[c]);
+}
+
+function showStatus(type, msg) {
+  statusDiv.className = 'status show ' + type;
+  if (type === 'loading') {
+    statusDiv.innerHTML = `<span class="spinner"></span> ${msg}`;
+  } else {
+    statusDiv.textContent = msg;
+  }
+}
+
+function hideStatus() {
+  statusDiv.className = 'status';
+}
+
+// ── Init ──
+loadModels();
+</script>
+</body>
+</html>

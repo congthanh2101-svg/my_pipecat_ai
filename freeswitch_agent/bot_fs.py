@@ -27,17 +27,19 @@ import re
 import time
 import wave
 from pathlib import Path
+from typing import Any
 
 import base64
+import httpx
 import numpy as np
 import soxr          # ← THÊM DÒNG NÀY
 from dotenv import load_dotenv
 from loguru import logger
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from openai import OpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
@@ -266,6 +268,8 @@ TTS_ENGINE = os.getenv("TTS_ENGINE", "piper").lower()
 OMNIVOICE_VOICE_PROFILE = os.getenv("OMNIVOICE_VOICE_PROFILE", str(Path(__file__).parent / "voice_profile_nu_mien_bac_1.pt"))
 OMNIVOICE_MODEL = os.getenv("OMNIVOICE_MODEL", "k2-fsa/OmniVoice")
 OMNIVOICE_NUM_STEP = int(os.getenv("OMNIVOICE_NUM_STEP", "32"))
+# OmniVoice API server (standalone) — dùng cho trang /tts-test
+OMNIVOICE_API_URL = os.getenv("OMNIVOICE_API_URL", "http://localhost:8001").rstrip("/")
 
 # FreeSWITCH Rest API — dùng cho tool calling (chuyển cuộc gọi đến queue tổng đài)
 FS_API_BASE_URL = os.getenv("FS_API_BASE_URL", "http://192.168.1.153:8443/api/v1")
@@ -280,7 +284,7 @@ SYSTEM_PROMPT = (
     "Bạn là trợ lý giọng nói tiếng Việt thân thiện, hữu ích.\n\n"
     "Quy tắc:\n"
     "- Bạn tên là Xon Len hay còn gọi là Xen Long, trợ lý giọng nói thân thiện.\n"
-    "- Trả lời NGẮN GỌN, tối đa 5-50 câu.\n"
+    "- Trả lời NGẮN GỌN, tối đa 20-50 câu.\n"
     "- LUÔN LUÔN có khoảng trắng giữa các từ và cuối câu phải có dấu chấm, dấu hỏi, dấu phẩy hoặc dấu chấm than.\n"
     "- Ví dụ viết ĐÚNG: 'Tôi là Xon Len' — KHÔNG viết 'TôilàXonLen'.\n"
     "- TUYỆT ĐỐI KHÔNG được dùng markdown, ký tự đặc biệt, dấu sao ** **, dấu gạch * *, dấu `, dấu #, emoji, hay bất kỳ định dạng nào. \n"
@@ -1154,6 +1158,7 @@ def create_services() -> tuple:
             provider=GIPFORMER_PROVIDER,
             use_int8=GIPFORMER_USE_INT8,
             decoding_method="greedy_search",
+            ttfs_p99_latency=2.0,
         )
         logger.info(f"VN STT: Gipformer (model_dir={GIPFORMER_MODEL_DIR}, "
                     f"provider={GIPFORMER_PROVIDER}, int8={GIPFORMER_USE_INT8})")
@@ -1722,6 +1727,337 @@ async def upload_test_ui():
     return HTMLResponse(path.read_text(encoding="utf-8")) if path.exists() else HTMLResponse("Not found", 404)
 
 
+# ---------------------------------------------------------------------------
+# TTS test page — Text → Voice (proxy qua OmniVoice API server)
+# ---------------------------------------------------------------------------
+class TTSRequest(BaseModel):
+    text: str = Field(..., min_length=1, description="Nội dung cần đọc")
+    voice_name: str = Field(..., description="Tên giọng đọc (xem /tts/voices)")
+    language: str | None = Field(None, description="Ngôn ngữ: 'vi', 'en', ...")
+    instruct: str | None = Field(None, description="Hướng dẫn giọng đọc (vd: 'female, gentle tone')")
+    num_step: int | None = Field(None, description="Số bước diffusion (mặc định 32)")
+
+
+def _wav_duration(wav_bytes: bytes) -> float:
+    """Tính thời lượng WAV bằng cách parse các chunks RIFF."""
+    try:
+        import struct
+        if wav_bytes[:4] != b"RIFF" or wav_bytes[8:12] != b"WAVE":
+            return 0.0
+        offset = 12
+        fmt_byte_rate = None
+        data_size = 0
+        while offset + 8 <= len(wav_bytes):
+            chunk_id = wav_bytes[offset:offset + 4]
+            chunk_size = struct.unpack_from("<I", wav_bytes, offset + 4)[0]
+            if chunk_id == b"fmt ":
+                # byte_rate nằm ở payload offset 8: offset + 8 (header) + 8 = offset + 16
+                fmt_byte_rate = struct.unpack_from("<I", wav_bytes, offset + 16)[0]
+            elif chunk_id == b"data":
+                data_size = chunk_size
+                break
+            offset += 8 + chunk_size + (chunk_size % 2)  # pad byte
+        if fmt_byte_rate and data_size:
+            return round(data_size / fmt_byte_rate, 2)
+    except Exception:
+        pass
+    return 0.0
+
+
+@app.get("/tts-test")
+async def tts_test_ui():
+    path = CLIENT_HTML / "tts-test.html"
+    return HTMLResponse(path.read_text(encoding="utf-8")) if path.exists() else HTMLResponse("Not found", 404)
+
+
+@app.get("/tts/voices")
+async def tts_voices():
+    """Danh sách giọng đọc OmniVoice (proxy từ API server :8001)."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{OMNIVOICE_API_URL}/voices")
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        logger.error(f"TTS voices fetch failed: {e}")
+        raise HTTPException(
+            503,
+            f"OmniVoice API không phản hồi tại {OMNIVOICE_API_URL}. "
+            f"Khởi động omnivoice_server.py trước. Chi tiết: {e}",
+        )
+
+
+@app.post("/tts")
+async def tts_generate(body: TTSRequest):
+    """Text → Voice: proxy tới OmniVoice API, trả JSON audio_base64."""
+    start = time.monotonic()
+    logger.info(f"🎤 TTS request: voice={body.voice_name} lang={body.language} "
+                f"text={body.text[:60]!r}")
+
+    payload = {
+        "voice_name": body.voice_name,
+        "text": body.text,
+        "instruct": body.instruct,
+        "language": body.language,
+        "num_step": body.num_step or OMNIVOICE_NUM_STEP,
+    }
+    try:
+        # Model OmniVoice lazy-load 30-60s ở request đầu — timeout rộng rãi
+        async with httpx.AsyncClient(timeout=300) as client:
+            resp = await client.post(f"{OMNIVOICE_API_URL}/tts/generate", json=payload)
+            resp.raise_for_status()
+            wav_bytes = resp.content
+    except httpx.HTTPStatusError as e:
+        detail = e.response.text[:300] if e.response is not None else str(e)
+        logger.error(f"TTS generate failed: {detail}")
+        raise HTTPException(502, f"OmniVoice API lỗi: {detail}")
+    except Exception as e:
+        logger.error(f"TTS generate failed: {e}")
+        raise HTTPException(
+            503,
+            f"OmniVoice API không phản hồi tại {OMNIVOICE_API_URL}. "
+            f"Khởi động omnivoice_server.py trước. Chi tiết: {e}",
+        )
+
+    if not wav_bytes:
+        raise HTTPException(502, "OmniVoice API trả về rỗng")
+
+    audio_b64 = base64.b64encode(wav_bytes).decode()
+    total = time.monotonic() - start
+    logger.info(f"✅ TTS done in {total:.2f}s: {len(wav_bytes)} bytes")
+
+    return {
+        "success": True,
+        "audio_base64": audio_b64,
+        "audio_format": "wav",
+        "audio_sample_rate": 24000,
+        "duration_s": _wav_duration(wav_bytes),
+        "processing_time_s": round(total, 2),
+    }
+
+
+# ---------------------------------------------------------------------------
+# STT test page — voice file/mic → text tiếng Việt (VietASR | Gipformer)
+# ---------------------------------------------------------------------------
+_STT_MODELS_META = [
+    {"name": "gipformer", "label": "Gipformer (Zipformer)", "default": True},
+    {"name": "vietasr", "label": "VietASR (Zipformer)", "default": False},
+]
+
+# Cache sherpa-onnx OfflineRecognizer theo tên model (load 1 lần)
+_stt_recognizers: dict[str, Any] = {}
+
+
+def _stt_model_available(name: str) -> bool:
+    """Kiểm tra model có file .onnx trong thư mục model."""
+    base = Path(GIPFORMER_MODEL_DIR) if name == "gipformer" else Path(VIETASR_MODEL_DIR)
+    return any(base.rglob("*.onnx"))
+
+
+def _get_stt_recognizer(name: str):
+    """Lazy-load sherpa-onnx recognizer, cache theo tên model.
+
+    Tái sử dụng logic load model (cuda fallback) của các STT service.
+    """
+    global _stt_recognizers
+    if name in _stt_recognizers:
+        return _stt_recognizers[name]
+
+    if name == "gipformer":
+        svc = GipformerSTTService(
+            model_dir=GIPFORMER_MODEL_DIR,
+            provider=GIPFORMER_PROVIDER,
+            use_int8=GIPFORMER_USE_INT8,
+            decoding_method="greedy_search",
+            ttfs_p99_latency=2.0,
+        )
+    else:  # vietasr
+        svc = VietASRSTTService(
+            model_dir=VIETASR_MODEL_DIR,
+            provider=VIETASR_PROVIDER,
+            decoding_method="greedy_search",
+        )
+
+    logger.info(f"🔊 STT: loading {name} model ...")
+    svc._load_model()
+    _stt_recognizers[name] = svc._recognizer
+    logger.info(f"🔊 STT: {name} model loaded")
+    return svc._recognizer
+
+
+# ── Silero VAD (offline segmentation theo khoảng lặng) ────────────────────────
+_vad_model = None
+
+
+def _get_vad_model():
+    """Lazy-load Silero VAD (torch), cache ở module level."""
+    global _vad_model
+    if _vad_model is None:
+        from silero_vad import load_silero_vad
+        logger.info("🔊 VAD: loading Silero VAD model ...")
+        _vad_model = load_silero_vad()
+        logger.info("🔊 VAD: Silero VAD model loaded")
+    return _vad_model
+
+
+def _vad_segments(pcm: np.ndarray, sample_rate: int = 16000) -> list[dict]:
+    """Silero VAD → danh sách đoạn nói {start, end} (samples).
+
+    - min_speech_duration_ms: bỏ đoạn nhiễu ngắn < 250ms
+    - min_silence_duration_ms: gộp khi khoảng lặng < 500ms
+    - max_speech_duration_s: cắt đoạn nói liên tục quá 30s (tránh OOM)
+    """
+    import torch
+    from silero_vad import get_speech_timestamps
+
+    model = _get_vad_model()
+    audio = torch.from_numpy(pcm.astype(np.float32) / 32768.0)
+    segs = get_speech_timestamps(
+        audio, model,
+        threshold=0.5,
+        sampling_rate=sample_rate,
+        min_speech_duration_ms=250,
+        min_silence_duration_ms=500,
+        max_speech_duration_s=30,
+    )
+    return [{"start": int(s["start"]), "end": int(s["end"])} for s in segs]
+
+
+def _decode_audio_pcm16(data: bytes, suffix: str) -> tuple[np.ndarray, float]:
+    """Giải mã audio bất kỳ (wav/mp3/ogg/m4a/...) → int16 PCM mono 16kHz.
+
+    Dùng ffmpeg để decode + resample. Trả về (pcm, duration_s).
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=suffix or ".wav", delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-i", tmp_path,
+             "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
+            capture_output=True,
+            timeout=60,
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            raise HTTPException(
+                400,
+                f"ffmpeg không giải mã được audio: "
+                f"{proc.stderr.decode(errors='replace')[:200]}",
+            )
+        pcm = np.frombuffer(proc.stdout, dtype=np.int16)
+        return pcm, len(pcm) / 16000.0
+    except subprocess.TimeoutExpired:
+        raise HTTPException(400, "Giải mã audio quá lâu (>60s)")
+    finally:
+        os.unlink(tmp_path)
+
+
+@app.get("/stt-test")
+async def stt_test_ui():
+    path = CLIENT_HTML / "stt-test.html"
+    return HTMLResponse(path.read_text(encoding="utf-8")) if path.exists() else HTMLResponse("Not found", 404)
+
+
+@app.get("/stt/models")
+async def stt_models():
+    """Danh sách model STT có sẵn (Gipformer mặc định, VietASR)."""
+    return {
+        "models": [
+            {
+                "name": m["name"],
+                "label": m["label"],
+                "default": m["default"],
+                "available": _stt_model_available(m["name"]),
+            }
+            for m in _STT_MODELS_META
+        ]
+    }
+
+
+@app.post("/stt")
+async def stt_transcribe(file: UploadFile = File(...), model: str = Form("gipformer")):
+    """Upload voice file → text tiếng Việt (VietASR | Gipformer)."""
+    start = time.monotonic()
+    model = model.lower().strip()
+    if model not in ("gipformer", "vietasr"):
+        raise HTTPException(400, f"Model không hợp lệ: {model}. Chọn 'gipformer' hoặc 'vietasr'")
+    if not _stt_model_available(model):
+        raise HTTPException(503, f"Model {model} chưa có file .onnx trong thư mục model")
+
+    contents = await file.read()
+    if len(contents) > 50 * 1024 * 1024:
+        raise HTTPException(413, "File quá lớn (tối đa 50MB)")
+    if len(contents) < 100:
+        raise HTTPException(400, "File quá nhỏ để nhận diện")
+
+    suffix = Path(file.filename or "").suffix.lower() or ".wav"
+    logger.info(f"🎧 STT: {file.filename} ({len(contents)}B, model={model})")
+
+    # 1. Giải mã → PCM int16 mono 16kHz (ffmpeg)
+    pcm, duration_s = _decode_audio_pcm16(contents, suffix)
+    if len(pcm) < 800:  # ~50ms @ 16kHz
+        raise HTTPException(400, "Audio quá ngắn, không nhận diện được")
+
+    loop = asyncio.get_event_loop()
+
+    # 2. Silero VAD: chia đoạn theo khoảng lặng (blocking → executor)
+    def _segment() -> list[dict]:
+        return _vad_segments(pcm)
+
+    segments_idx = await loop.run_in_executor(None, _segment)
+
+    # Fallback: VAD không phát hiện (audio ồn/liền) → cả file là 1 đoạn
+    if not segments_idx:
+        logger.warning("VAD không tìm thấy đoạn nói → dùng toàn bộ audio")
+        segments_idx = [{"start": 0, "end": len(pcm)}]
+
+    # 3. STT từng đoạn (mỗi đoạn ngắn → tránh OOM khi audio dài)
+    def _infer_segment(seg: dict) -> str:
+        seg_pcm = pcm[seg["start"]:seg["end"]]
+        if len(seg_pcm) < 800:
+            return ""
+        rec = _get_stt_recognizer(model)
+        samples = seg_pcm.astype(np.float32) / 32768.0
+        stream = rec.create_stream()
+        stream.accept_waveform(sample_rate=16000, waveform=samples)
+        rec.decode_stream(stream)
+        return stream.result.text.strip()
+
+    segments_out: list[dict] = []
+    text_parts: list[str] = []
+    for seg in segments_idx:
+        raw = await loop.run_in_executor(None, _infer_segment, seg)
+        if not raw:
+            continue
+        # VietASR/Gipformer output UPPERCASE → câu có hoa đầu
+        seg_text = raw.lower()
+        seg_text = seg_text[0].upper() + seg_text[1:] if len(seg_text) > 1 else seg_text.upper()
+        segments_out.append({
+            "start_s": round(seg["start"] / 16000, 2),
+            "end_s": round(seg["end"] / 16000, 2),
+            "text": seg_text + ".",
+        })
+        text_parts.append(seg_text)
+
+    # 4. Ghép transcript: mỗi đoạn = 1 câu (thêm dấu câu)
+    text = ". ".join(text_parts) + "." if text_parts else ""
+
+    total = time.monotonic() - start
+    logger.info(f"✅ STT done ({model}) in {total:.2f}s: {len(segments_out)} segments → {text[:100]!r}")
+    return {
+        "success": bool(text),
+        "model": model,
+        "text": text,
+        "segments": segments_out,
+        "segmented": len(segments_idx) > 1,
+        "duration_s": round(duration_s, 2),
+        "processing_time_s": round(total, 2),
+    }
+
+
 @app.get("/pipecat-client2")
 async def pipecat_client2_ui():
     path = CLIENT_HTML / "pipecat-client2.html"
@@ -2005,7 +2341,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
             max_tokens=10024,
             temperature=1.0,	# Old 0.7, temperature=0.0 (thêm vào gọi Whisper)  Ít sáng tạo hơn, chỉ nhận diện khi thực sự chắc chắn
             top_p=0.95,
-            top_k=64,
+            # top_k=64,   xung dot voi /upload-tes
         )
         response_text = llm_resp.choices[0].message.content.strip()
         llm_time = time.monotonic() - llm_start
