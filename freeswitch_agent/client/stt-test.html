@@ -128,6 +128,13 @@
     <div class="form-row">
       <input type="text" id="url-input" placeholder="https://www.youtube.com/watch?v=... hoặc https://youtu.be/...">
     </div>
+    <label class="postprocess-toggle" style="margin-top:10px;">
+      <input type="checkbox" id="subtitle-cb">
+      <span>
+        <span class="label-text">📝 Ưu tiên phụ đề YouTube (nếu có)</span><br>
+        <span class="sub">Dùng phụ đề miễn phí thay vì STT khi video có sẵn</span>
+      </span>
+    </label>
 
     <div class="btn-row">
       <button class="btn btn-primary" id="submit-btn" disabled>📝 Chuyển thành text</button>
@@ -157,6 +164,7 @@ const modelOptions = document.getElementById('model-options');
 const postprocessToggle = document.getElementById('postprocess-toggle');
 const postprocessCb = document.getElementById('postprocess-cb');
 const postprocessSub = document.getElementById('postprocess-sub');
+const subtitleCb = document.getElementById('subtitle-cb');
 const urlInput = document.getElementById('url-input');
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
@@ -383,6 +391,7 @@ submitBtn.addEventListener('click', async () => {
   else formData.append('file', selectedFile);
   formData.append('model', selectedModel);
   if (postprocessCb.checked) formData.append('postprocess', 'true');
+  if (useUrl && subtitleCb.checked) formData.append('use_subtitles', 'true');
 
   try {
     const resp = await fetch(useUrl ? '/stt/url' : '/stt', {
@@ -400,9 +409,12 @@ submitBtn.addEventListener('click', async () => {
 
     resultCard.classList.remove('hidden');
     resultText.textContent = data.text || '(không nhận diện được giọng nói)';
-    showStatus('success', '✅ Nhận diện thành công!' + (data.postprocess ? ' (đã định dạng bằng Qwen3-4B)' : ''));
+    const isSubtitle = data.source_type === 'subtitle';
+    showStatus('success',
+      isSubtitle ? '✅ Dùng phụ đề YouTube!' : '✅ Nhận diện thành công!' + (data.postprocess ? ' (đã định dạng bằng Qwen3-4B)' : ''));
     timingDiv.textContent =
-      `⏱ Model: ${data.model} · Audio: ${data.duration_s}s · Xử lý: ${data.processing_time_s}s` +
+      `⏱ ${isSubtitle ? '📝 Phụ đề YouTube' : `Model: ${data.model}`} · Audio: ${data.duration_s}s` +
+      (isSubtitle ? ' · (bỏ qua STT)' : ` · Xử lý: ${data.processing_time_s}s`) +
       (data.segmented ? ` · ${data.segments.length} đoạn` : '') +
       (data.postprocess ? ` · ✨ dấu câu/viết hoa` : '') +
       (data.source ? ` · 🎬 ${data.source.slice(0, 60)}` : '');

@@ -2235,6 +2235,12 @@ def _ytdlp_download_audio(url: str) -> tuple[str, dict]:
     import tempfile
     import yt_dlp
 
+    info = _ytdlp_extract_info(url)  # pre-check title
+    # Giới hạn duration chỉ áp dụng khi tải audio + STT (tốn tài nguyên)
+    dur = info.get("duration") or 0
+    if dur > YTDLP_MAX_DURATION:
+        raise HTTPException(400, f"Video quá dài ({dur}s > {YTDLP_MAX_DURATION}s giới hạn)")
+
     outdir = tempfile.mkdtemp(prefix="ytdlp_")
     common = {
         "noplaylist": True,
@@ -2245,19 +2251,6 @@ def _ytdlp_download_audio(url: str) -> tuple[str, dict]:
         "max_filesize": YTDLP_MAX_FILESIZE,
         "outtmpl": str(Path(outdir) / "audio.%(ext)s"),
     }
-
-    # Pre-check duration (tránh tải video dài)
-    try:
-        with yt_dlp.YoutubeDL({**common, "skip_download": True}) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except Exception as e:
-        raise HTTPException(502, f"Không lấy được thông tin video: {str(e)[:200]}")
-
-    dur = info.get("duration") or 0
-    if dur > YTDLP_MAX_DURATION:
-        raise HTTPException(400, f"Video quá dài ({dur}s > {YTDLP_MAX_DURATION}s giới hạn)")
-    if not info.get("title"):
-        raise HTTPException(400, "Video không có tiêu đề hợp lệ")
 
     # Download audio
     try:
@@ -2272,13 +2265,158 @@ def _ytdlp_download_audio(url: str) -> tuple[str, dict]:
     return str(files[0]), info
 
 
+def _ytdlp_extract_info(url: str) -> dict:
+    """Lấy thông tin video YouTube (không tải), kiểm tra giới hạn duration/title."""
+    import yt_dlp
+
+    opts = {
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 15,
+        "retries": 3,
+        "skip_download": True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as e:
+        raise HTTPException(502, f"Không lấy được thông tin video: {str(e)[:200]}")
+
+    if not info.get("title"):
+        raise HTTPException(400, "Video không có tiêu đề hợp lệ")
+    return info
+
+
+# ── Phụ đề YouTube miễn phí (tùy chọn) ────────────────────────────────────────
+_SUBTITLE_LANGS = ("vi", "en")
+
+
+def _fetch_youtube_subtitles(info: dict) -> tuple[str, list[dict]] | None:
+    """Lấy phụ đề miễn phí (vi→en; manual→auto). Trả (text, segments) hoặc None."""
+    import urllib.request
+
+    for src in ("subtitles", "automatic_captions"):
+        tracks_by_lang = info.get(src) or {}
+        for lang in _SUBTITLE_LANGS:
+            tracks = tracks_by_lang.get(lang)
+            if not tracks:
+                continue
+            # Ưu tiên json3/srv3 (có timestamp) → vtt → ttml
+            track = None
+            for ext in ("json3", "srv3", "vtt", "ttml"):
+                track = next((t for t in tracks if t.get("ext") == ext), None)
+                if track:
+                    break
+            if not track or not track.get("url"):
+                continue
+            try:
+                with urllib.request.urlopen(track["url"], timeout=20) as resp:
+                    content = resp.read().decode("utf-8", "replace")
+            except Exception as e:
+                logger.warning(f"⚠️ Không tải được phụ đề {lang}/{src}: {e}")
+                continue
+            if track["ext"] in ("json3", "srv3"):
+                parsed = _parse_subtitles_json3(content)
+            elif track["ext"] == "vtt":
+                parsed = _parse_subtitles_vtt(content)
+            else:  # ttml — bỏ qua
+                continue
+            if parsed and parsed[1]:
+                logger.info(f"📝 Dùng phụ đề YouTube ({src}/{lang}/{track['ext']}): "
+                            f"{len(parsed[1])} dòng")
+                return parsed
+    return None
+
+
+def _parse_subtitles_json3(content: str) -> tuple[str, list[dict]]:
+    """Parse phụ đề json3 → (text, segments[{start_s, end_s, text}]).
+
+    Phụ đề đã có dấu câu → giữ nguyên text, không thêm dấu chấm.
+    """
+    import json as _json
+
+    data = _json.loads(content)
+    segments: list[dict] = []
+    text_parts: list[str] = []
+    for e in data.get("events", []):
+        t0 = e.get("tStartMs", 0) / 1000.0
+        dur = e.get("dDurationMs", 0) / 1000.0
+        text = "".join(s.get("utf8", "") for s in e.get("segs", []))
+        text = text.replace("\n", " ").strip()
+        if not text:
+            continue
+        segments.append({
+            "start_s": round(t0, 2),
+            "end_s": round(t0 + dur, 2),
+            "text": text,
+        })
+        text_parts.append(text)
+    return " ".join(text_parts), segments
+
+
+def _parse_subtitles_vtt(content: str) -> tuple[str, list[dict]]:
+    """Parse phụ đề WebVTT → (text, segments). Fallback khi không có json3."""
+
+    def _ts(s: str) -> float:
+        s = s.strip().replace(",", ".")
+        toks = s.split(":")
+        if len(toks) == 3:
+            return float(toks[0]) * 3600 + float(toks[1]) * 60 + float(toks[2])
+        return float(toks[0]) * 60 + float(toks[1])
+
+    segments: list[dict] = []
+    text_parts: list[str] = []
+    cur_start = cur_end = None
+    lines: list[str] = []
+    for ln in content.splitlines():
+        ln = ln.rstrip()
+        if "-->" in ln:
+            if cur_start is not None and lines:
+                text = " ".join(x.strip() for x in lines).strip()
+                if text:
+                    segments.append({
+                        "start_s": round(cur_start, 2),
+                        "end_s": round(cur_end, 2),
+                        "text": text,
+                    })
+                    text_parts.append(text)
+            try:
+                parts = ln.split("-->")
+                cur_start = _ts(parts[0])
+                cur_end = _ts(parts[1].split()[0])
+            except Exception:
+                cur_start = cur_end = None
+            lines = []
+        elif ln and not ln.startswith(("WEBVTT", "Kind:", "Language:", "NOTE", "STYLE", "Region:")):
+            if re.match(r"^\d+$", ln):  # cue number
+                continue
+            lines.append(ln)
+    # Flush cuối
+    if cur_start is not None and lines:
+        text = " ".join(x.strip() for x in lines).strip()
+        if text:
+            segments.append({
+                "start_s": round(cur_start, 2),
+                "end_s": round(cur_end, 2),
+                "text": text,
+            })
+            text_parts.append(text)
+    return " ".join(text_parts), segments
+
+
 @app.post("/stt/url")
 async def stt_transcribe_url(
     url: str = Form(...),
     model: str = Form("gipformer"),
     postprocess: bool = Form(False),
+    use_subtitles: bool = Form(False),
 ):
-    """Link YouTube → tải audio → text tiếng Việt (dùng chung core STT)."""
+    """Link YouTube → text tiếng Việt.
+
+    Nếu use_subtitles=True và video có phụ đề miễn phí (vi/en) → dùng phụ đề
+    luôn (không download/STT). Ngược lại → tải audio + STT như cũ.
+    """
     import shutil
     from urllib.parse import urlparse
 
@@ -2293,9 +2431,35 @@ async def stt_transcribe_url(
     if host not in _YOUTUBE_HOSTS:
         raise HTTPException(400, f"Chỉ hỗ trợ link YouTube, nhận được: '{host or url[:40]}'")
 
-    logger.info(f"🎬 STT URL: {url} (model={model}, postprocess={postprocess})")
+    logger.info(f"🎬 STT URL: {url} (model={model}, postprocess={postprocess}, "
+                f"use_subtitles={use_subtitles})")
 
     loop = asyncio.get_event_loop()
+
+    # 1. Lấy info video (không tải) — dùng cho kiểm tra phụ đề + giới hạn
+    info = await loop.run_in_executor(None, _ytdlp_extract_info, url)
+
+    # 2. Tùy chọn: dùng phụ đề miễn phí nếu video có sẵn
+    if use_subtitles:
+        sub = await loop.run_in_executor(None, _fetch_youtube_subtitles, info)
+        if sub:
+            text, segments = sub
+            return {
+                "success": True,
+                "model": "youtube_subtitle",
+                "text": text,
+                "segments": segments,
+                "segmented": len(segments) > 1,
+                "postprocess": False,
+                "source_type": "subtitle",
+                "source": info.get("title", ""),
+                "source_url": url,
+                "duration_s": round(info.get("duration") or 0, 2),
+                "processing_time_s": 0,
+            }
+        logger.info("ℹ️ Video không có phụ đề khả dụng → fallback STT")
+
+    # 3. Tải audio + STT
     audio_path, info = await loop.run_in_executor(None, _ytdlp_download_audio, url)
     try:
         suffix = Path(audio_path).suffix.lower() or ".webm"
@@ -2307,6 +2471,7 @@ async def stt_transcribe_url(
         result = await _process_audio_stt(pcm, duration_s, model, postprocess)
         result["source"] = info.get("title", "")
         result["source_url"] = url
+        result["source_type"] = "stt"
         return result
     finally:
         shutil.rmtree(Path(audio_path).parent, ignore_errors=True)
