@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "TikTok Transcript - Lấy phụ đề",
+  "version": "1.0.0",
+  "description": "Lấy phụ đề miễn phí từ video TikTok ngay trong trình duyệt (đọc caption có sẵn của video).",
+  "permissions": ["activeTab", "storage", "scripting"],
+  "host_permissions": [
+    "https://www.tiktok.com/*",
+    "https://*.tiktok.com/*",
+    "https://*.tiktokcdn.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.tiktok.com/*", "https://*.tiktok.com/*"],
+      "js": ["capture.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://www.tiktok.com/*", "https://*.tiktok.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "TikTok Transcript - Lấy phụ đề"
+  }
+}
