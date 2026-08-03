@@ -63,6 +63,11 @@ Trong panel bấm checkbox **"🔓 Phát video khi tab ẩn"**:
 > Giới hạn cứng của trình duyệt (throttle tab nền) không gỡ được 100%, nhưng
 > video có audio thường vẫn chạy nền — và phần TikTok tự dừng là đã gỡ được.
 
+### ⏱ Ẩn mốc thời gian
+Checkbox **"⏱ Ẩn mốc thời gian"** trong panel: ẩn `[0:00.0 – 0:02.0]` ở các
+đoạn và **không kèm timestamp khi Copy**. Lựa chọn được lưu nhớ (`chrome.storage`).
+> File `.srt` tải về vẫn luôn giữ timestamp (định dạng SRT bắt buộc).
+
 ### Diagnostics
 Nếu không lấy được, panel báo rõ:
 - `Capture: JSON(cap)/JSON(noCap)/SRT` — TikTok trả gì

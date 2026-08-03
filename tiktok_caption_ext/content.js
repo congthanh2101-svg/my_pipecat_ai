@@ -239,6 +239,7 @@
     .ttcap-opt{display:flex;align-items:center;gap:8px;padding:8px 14px;border-top:1px solid #222;background:#151515;font-size:13px;color:#ccc}
     .ttcap-opt input{accent-color:#fe2c55;width:15px;height:15px;cursor:pointer}
     .ttcap-opt-status{font-size:12px;color:#22c55e;margin-left:auto;white-space:nowrap}
+    .ttcap-hide-time .ttcap-time{display:none}
     .ttcap-foot button{flex:1;padding:8px;border:none;border-radius:8px;font-weight:600;cursor:pointer;font-size:13px}
     .ttcap-copy{background:#fe2c55;color:#fff}
     .ttcap-dl{background:#333;color:#eee}
@@ -257,6 +258,12 @@
   let panel = null;
   let domCaptureActive = false;
   let unlockActive = false; // mở khóa phát khi tab ẩn (main-world script báo về)
+  let hideTimes = false; // ẩn mốc thời gian trong panel/copy
+
+  // Nạp lựa chọn đã lưu
+  try {
+    chrome.storage.local.get({ hideTimes: false }, (o) => { hideTimes = !!o.hideTimes; });
+  } catch (e) {}
 
   // Nhận tín hiệu từ main-world unlock script
   window.addEventListener('message', (e) => {
@@ -281,6 +288,12 @@
           <span class="ttcap-opt-status" id="ttcap-unlock-status"></span>
         </label>
       </div>
+      <div class="ttcap-opt">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;width:100%">
+          <input type="checkbox" id="ttcap-hidetime"> ⏱ Ẩn mốc thời gian
+          <span class="ttcap-opt-status" id="ttcap-hidetime-status"></span>
+        </label>
+      </div>
       <div class="ttcap-foot">
         <button class="ttcap-copy">📋 Copy</button>
         <button class="ttcap-dl">⬇ Tải .srt</button>
@@ -303,7 +316,20 @@
       }
     };
 
-    panel.querySelector('.ttcap-close').onclick = () => panel.remove();
+    // Toggle ẩn mốc thời gian (lưu chrome.storage)
+    const timeCb = panel.querySelector('#ttcap-hidetime');
+    const timeStatus = panel.querySelector('#ttcap-hidetime-status');
+    timeCb.checked = hideTimes;
+    panel.classList.toggle('ttcap-hide-time', hideTimes);
+    timeStatus.textContent = hideTimes ? 'đang ẩn' : '';
+    timeCb.onchange = () => {
+      hideTimes = timeCb.checked;
+      panel.classList.toggle('ttcap-hide-time', hideTimes);
+      timeStatus.textContent = hideTimes ? 'đang ẩn' : '';
+      try { chrome.storage.local.set({ hideTimes }); } catch (e) {}
+    };
+
+    panel.querySelector('.ttcap-close').onclick = () => { panel.remove(); panel = null; };
     document.documentElement.appendChild(panel);
     return panel;
   }
@@ -330,7 +356,9 @@
       body.appendChild(row);
     }
     panel.querySelector('.ttcap-copy').onclick = () => {
-      navigator.clipboard.writeText(segments.map((s) => `[${fmt(s.start)}-${fmt(s.end)}] ${s.text}`).join('\n'))
+      // Nếu đang ẩn mốc thời gian → copy không kèm timestamp
+      const lines = segments.map((s) => (hideTimes ? s.text : `[${fmt(s.start)}-${fmt(s.end)}] ${s.text}`));
+      navigator.clipboard.writeText(lines.join('\n'))
         .then(() => { alert('✅ Đã copy transcript'); });
     };
     panel.querySelector('.ttcap-dl').onclick = () => {
