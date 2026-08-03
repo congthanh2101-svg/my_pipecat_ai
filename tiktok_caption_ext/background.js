@@ -16,13 +16,14 @@ function interceptorFn() {
   function looksLikeCaption(text) {
     if (!text || typeof text !== 'string' || text.length < 8) return false;
     if (text.includes('-->')) return true;   // SRT / WebVTT
+    if (/<text[\s>]/i.test(text)) return true; // YouTube timedtext XML
     const t = text.trimStart();
     if (t.startsWith('{') || t.startsWith('[')) {
-      // TikTok dùng 'captionInfos' (camelCase) + subtitleType + noCaptionReason
-      // → bắt cả trường hợp video KHÔNG có caption để hiển thị lý do
+      // TikTok: captionInfos/subtitleType/noCaptionReason
+      // YouTube: captionTracks (trong player response JSON)
       if (text.includes('captionInfos') || text.includes('caption_infos') ||
           text.includes('subtitleType') || text.includes('noCaptionReason') ||
-          text.includes('"subtitle"')) return true;
+          text.includes('"subtitle"') || text.includes('captionTracks')) return true;
       try {
         const j = JSON.parse(text);
         if (Array.isArray(j.body) || Array.isArray(j.data) || Array.isArray(j.events)) return true;
@@ -33,7 +34,7 @@ function interceptorFn() {
 
   function shouldSniff(url, ct) {
     if (!url) return false;
-    if (/(caption|subtitle|\.srt|\.vtt|\.ttml|webvtt)/i.test(url)) return true;
+    if (/(caption|subtitle|\.srt|\.vtt|\.ttml|webvtt|timedtext|youtubei)/i.test(url)) return true;
     if (/json/i.test(ct || '')) return true;      // mọi response JSON
     if (/api\//i.test(url)) return true;          // mọi request API
     return false;
@@ -77,7 +78,48 @@ function interceptorFn() {
   };
 }
 
+// Mở khóa phát video khi tab ẩn — chạy trong MAIN WORLD
+function unlockFn() {
+  if (window.__tt_unlocked__) return;
+  window.__tt_unlocked__ = true;
+
+  // 1. Báo cho trang biết tab LUÔN "visible" → TikTok không tự dừng video
+  try {
+    Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
+    Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+  } catch (e) {}
+  try { document.hasFocus = () => true; } catch (e) {}
+
+  // 2. Tự phát lại nếu video bị dừng không phải do người dùng
+  let userPausedUntil = 0;
+  document.addEventListener('pause', (e) => {
+    const v = e.target;
+    if (v && v.tagName === 'VIDEO' && navigator.userActivation && navigator.userActivation.isActive) {
+      userPausedUntil = Date.now() + 4000; // user bấm pause — tôn trọng trong 4s
+    }
+  }, true);
+  setInterval(() => {
+    const v = document.querySelector('video');
+    if (!v || v.ended || !v.paused) return;
+    if (Date.now() < userPausedUntil) return;
+    if (v.readyState >= 2) v.play().catch(() => {});
+  }, 800);
+
+  // 3. Báo cho content script biết đã kích hoạt
+  try { window.postMessage({ __tt_unlock: true }, '*'); } catch (e) {}
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === 'INJECT_UNLOCK') {
+    chrome.scripting.executeScript({
+      target: { tabId: sender.tab.id },
+      world: 'MAIN',
+      injectImmediately: true,
+      func: unlockFn,
+    }).then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true; // async
+  }
   if (msg && msg.type === 'INJECT_MAIN') {
     chrome.scripting.executeScript({
       target: { tabId: sender.tab.id },

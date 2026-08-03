@@ -26,14 +26,15 @@
     });
   }
 
-  // Nhận diện mảng caption tracks: items có url + (lang hoặc đuôi .srt/.vtt)
+  // Nhận diện mảng caption tracks: items có url/baseUrl + lang
+  // (TikTok: url; YouTube: baseUrl)
   function isCaptionArray(arr) {
     if (!Array.isArray(arr) || !arr.length) return false;
     const it = arr[0];
     if (typeof it !== 'object' || it === null) return false;
-    const url = it.url || it.Url || '';
+    const url = it.url || it.Url || it.baseUrl || '';
     if (typeof url !== 'string') return false;
-    const hasLang = !!(it.language_code || it.lang || it.language_name || it.language);
+    const hasLang = !!(it.language_code || it.languageCode || it.lang || it.language_name || it.language);
     return hasLang || /\.(srt|vtt|ttml)$/i.test(url);
   }
 
@@ -42,7 +43,8 @@
   // hết, rồi pickContext chọn đúng video đang xem.
   function findCaptionContexts(obj, currentId = '', depth = 0, out = []) {
     if (!obj || depth > MAX_DEPTH) return out;
-    const id = obj.aweme_id || obj.awemeId || obj.id || currentId;
+    const id = obj.aweme_id || obj.awemeId || obj.videoId ||
+               (obj.videoDetails && obj.videoDetails.videoId) || obj.id || currentId;
     if (Array.isArray(obj)) {
       if (isCaptionArray(obj)) {
         out.push({ tracks: obj, videoId: id });
@@ -53,7 +55,7 @@
     }
     if (typeof obj === 'object') {
       for (const k of Object.keys(obj)) {
-        if (['caption_infos', 'captionInfos', 'subtitle', 'captions', 'caption_list'].includes(k)) {
+        if (['caption_infos', 'captionInfos', 'captionTracks', 'subtitle', 'captions', 'caption_list'].includes(k)) {
           const v = obj[k];
           if (Array.isArray(v) && v.length) out.push({ tracks: v, videoId: id });
         }
@@ -63,10 +65,20 @@
     return out;
   }
 
-  // ID video đang xem từ URL (https://www.tiktok.com/@user/video/123...)
+  // ID video đang xem từ URL
+  // TikTok:  /@user/video/<số>   |   YouTube: /watch?v=<id> hoặc /shorts/<id>
   function currentVideoId() {
-    const m = window.location.pathname.match(/\/video\/(\d+)/);
-    return m ? m[1] : '';
+    const tt = window.location.pathname.match(/\/video\/(\d+)/);
+    if (tt) return tt[1];
+    if (/youtube\.com/i.test(window.location.hostname)) {
+      try {
+        const v = new URL(window.location.href).searchParams.get('v');
+        if (v) return v;
+      } catch (e) {}
+      const s = window.location.pathname.match(/\/shorts\/([A-Za-z0-9_-]{11})/);
+      if (s) return s[1];
+    }
+    return '';
   }
 
   // Lọc context theo video đang xem: khớp ID → chưa rõ ID → KHÔNG dùng video khác
@@ -92,8 +104,10 @@
         return findCaptionContexts(JSON.parse(el.textContent));
       } catch (e) { /* bỏ qua */ }
     }
-    // 3. SIGI_STATE
+    // 3. SIGI_STATE (TikTok)
     if (window.SIGI_STATE) return findCaptionContexts(window.SIGI_STATE);
+    // 4. ytInitialPlayerResponse (YouTube) — chứa captionTracks
+    if (window.ytInitialPlayerResponse) return findCaptionContexts(window.ytInitialPlayerResponse);
     return [];
   }
 
@@ -101,7 +115,7 @@
   function findFromResourceCache() {
     const entries = performance.getEntriesByType('resource');
     for (const e of entries) {
-      if (/(caption|subtitle|\.srt|\.vtt|\.ttml)/i.test(e.name)) {
+      if (/(caption|subtitle|\.srt|\.vtt|\.ttml|timedtext)/i.test(e.name)) {
         return [{ url: e.name, language_code: 'auto' }];
       }
     }
@@ -222,6 +236,9 @@
     .ttcap-loading{color:#999;text-align:center;padding:20px 0}
     .ttcap-note{color:#ffb02e;font-size:13px;margin:8px 0;padding:8px 10px;background:#2a2110;border-radius:6px}
     .ttcap-foot{display:flex;gap:8px;padding:10px 14px;border-top:1px solid #222;background:#1a1a1a}
+    .ttcap-opt{display:flex;align-items:center;gap:8px;padding:8px 14px;border-top:1px solid #222;background:#151515;font-size:13px;color:#ccc}
+    .ttcap-opt input{accent-color:#fe2c55;width:15px;height:15px;cursor:pointer}
+    .ttcap-opt-status{font-size:12px;color:#22c55e;margin-left:auto;white-space:nowrap}
     .ttcap-foot button{flex:1;padding:8px;border:none;border-radius:8px;font-weight:600;cursor:pointer;font-size:13px}
     .ttcap-copy{background:#fe2c55;color:#fff}
     .ttcap-dl{background:#333;color:#eee}
@@ -233,12 +250,18 @@
 
   const btn = document.createElement('button');
   btn.className = 'ttcap-btn';
-  btn.textContent = '📝 Phụ đề TikTok';
-  btn.title = 'Lấy phụ đề miễn phí của video TikTok này';
+  btn.textContent = '📝 Lấy phụ đề';
+  btn.title = 'Lấy phụ đề miễn phí của video TikTok/YouTube này';
   document.documentElement.appendChild(btn);
 
   let panel = null;
   let domCaptureActive = false;
+  let unlockActive = false; // mở khóa phát khi tab ẩn (main-world script báo về)
+
+  // Nhận tín hiệu từ main-world unlock script
+  window.addEventListener('message', (e) => {
+    if (e.data && e.data.__tt_unlock) unlockActive = true;
+  });
 
   function fmt(s) {
     const m = Math.floor(s / 60);
@@ -250,13 +273,36 @@
     panel = document.createElement('div');
     panel.className = 'ttcap-panel';
     panel.innerHTML = `
-      <div class="ttcap-head">📝 Phụ đề TikTok <button class="ttcap-close">✕</button></div>
+      <div class="ttcap-head">📝 Lấy phụ đề <button class="ttcap-close">✕</button></div>
       <div class="ttcap-body"></div>
+      <div class="ttcap-opt">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;width:100%">
+          <input type="checkbox" id="ttcap-unlock"> 🔓 Phát video khi tab ẩn
+          <span class="ttcap-opt-status" id="ttcap-unlock-status"></span>
+        </label>
+      </div>
       <div class="ttcap-foot">
         <button class="ttcap-copy">📋 Copy</button>
         <button class="ttcap-dl">⬇ Tải .srt</button>
         <button class="ttcap-dom">🎬 Bắt đầu ghi (CC)</button>
       </div>`;
+
+    // Toggle mở khóa phát khi tab ẩn
+    const unlockCb = panel.querySelector('#ttcap-unlock');
+    const unlockStatus = panel.querySelector('#ttcap-unlock-status');
+    unlockCb.checked = unlockActive;
+    unlockStatus.textContent = unlockActive ? '✅ đang bật' : '';
+    unlockCb.onchange = () => {
+      if (unlockCb.checked) {
+        chrome.runtime.sendMessage({ type: 'INJECT_UNLOCK' }, (r) => {
+          if (r && r.ok) { unlockActive = true; unlockStatus.textContent = '✅ đang bật'; }
+          else { unlockStatus.textContent = '❌ lỗi'; unlockCb.checked = false; }
+        });
+      } else {
+        location.reload(); // bỏ patch bằng cách reload tab
+      }
+    };
+
     panel.querySelector('.ttcap-close').onclick = () => panel.remove();
     document.documentElement.appendChild(panel);
     return panel;
@@ -318,21 +364,27 @@
   }
 
   // Danh sách URL cần thử cho 1 track: ưu tiên URL giống caption (webvtt/vtt)
+  // TikTok: url/urlList; YouTube: baseUrl (timedtext)
   function trackUrls(t) {
     const urls = [];
-    const isCap = (u) => /webvtt|\.vtt|\.srt|caption|format=webvtt/i.test(u);
+    const isCap = (u) => /webvtt|\.vtt|\.srt|caption|format=webvtt|timedtext/i.test(u);
     if (Array.isArray(t.urlList)) {
       urls.push(...t.urlList.filter(isCap));
       urls.push(...t.urlList.filter((u) => !isCap(u)));
     }
-    for (const u of [t.url, t.Url, t.srt_url]) {
+    for (const u of [t.baseUrl, t.url, t.Url, t.srt_url]) {
       if (u && !urls.includes(u)) urls.push(u);
     }
-    return urls;
+    // YouTube timedtext: ép định dạng VTT (dễ parse) nếu chưa có fmt=
+    return urls.map((u) =>
+      u.includes('timedtext') && !/fmt=/i.test(u)
+        ? u + (u.includes('?') ? '&' : '?') + 'fmt=vtt'
+        : u
+    );
   }
 
   async function fetchFirstTrack(tracks) {
-    const pick = (t) => normLang(t.language || t.language_code || t.lang || t.language_name || 'auto');
+    const pick = (t) => normLang(t.language || t.languageCode || t.language_code || t.lang || t.language_name || 'auto');
     const sorted = [...tracks].sort((a, b) => {
       const ia = PREFERRED_LANGS.indexOf(pick(a));
       const ib = PREFERRED_LANGS.indexOf(pick(b));

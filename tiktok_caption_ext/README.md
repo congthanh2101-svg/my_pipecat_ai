@@ -1,6 +1,6 @@
-# TikTok Transcript - Lấy phụ đề miễn phí
+# Transcript TikTok & YouTube - Lấy phụ đề miễn phí
 
-Chrome extension lấy **phụ đề có sẵn** (thủ công hoặc tự động) của video TikTok
+Chrome extension lấy **phụ đề có sẵn** (thủ công hoặc tự động) của video TikTok VÀ YouTube
 ngay trong trình duyệt — **không download video, không cần STT, không cần proxy**.
 
 Cách làm này giống hệt transcript24.com: đọc caption có sẵn của video từ dữ liệu trang.
@@ -16,14 +16,19 @@ Cách làm này giống hệt transcript24.com: đọc caption có sẵn của v
 
 ## Cách dùng
 
-1. Mở 1 video TikTok bất kỳ (`https://www.tiktok.com/...`)
-2. **BẬT phụ đề (CC)** trên video player trước (nút "CC") — để TikTok tải caption track
-3. Bấm nút nổi **📝 Phụ đề TikTok** (góc phải trên)
+**TikTok:**
+1. Mở video TikTok (`https://www.tiktok.com/...`)
+2. **BẬT phụ đề (CC)** trên video player trước — để TikTok tải caption track
+3. Bấm nút nổi **📝 Lấy phụ đề** (góc phải trên)
 4. Panel hiện transcript kèm timestamp → **Copy** hoặc **Tải .srt**
 
-> ⚠️ Quan trọng: **bật CC trước**, rồi mới bấm nút lấy phụ đề — extension bắt
-> caption track khi TikTok tải về. Nếu chưa bật CC, extension sẽ báo debug
-> `[network:0 ...]` và đề xuất chế độ ghi CC.
+**YouTube:**
+1. Mở video YouTube (`https://www.youtube.com/watch?v=...` hoặc `/shorts/...`)
+2. Bấm nút nổi **📝 Lấy phụ đề** (YouTube tải captionTracks sẵn trong player response)
+3. Panel hiện transcript kèm timestamp → **Copy** hoặc **Tải .srt**
+
+> ⚠️ TikTok: **bật CC trước** rồi bấm nút. Nếu chưa bật, debug `[network:0 ...]`
+> và đề xuất chế độ ghi CC.
 
 ### Nếu panel báo "Không lấy được phụ đề sẵn [debug]"
 - Nhìn **số trong debug**: `network:X` = số caption track bắt được từ mạng.
@@ -47,6 +52,17 @@ Extension thu thập **tất cả** `captionInfos`, so khớp **video ID đang x
 trước → chưa rõ ID → nếu chỉ có video khác rõ ràng thì **không bắt nhầm**.
 Debug hiện trong panel: `🎬 Video: <id> (đang xem: <id>)`.
 
+### 🔓 Phát video khi tab ẩn
+TikTok tự dừng video khi tab không còn hoạt động (chuyển tab, thu nhỏ, bị che).
+Trong panel bấm checkbox **"🔓 Phát video khi tab ẩn"**:
+- Báo `document.hidden`/`visibilityState`/`hasFocus` luôn là *visible* → TikTok
+  không nhận ra tab ẩn → không tự dừng
+- **Tự phát lại** mỗi ~0.8s nếu video bị dừng không phải do bạn bấm pause
+  (tôn trọng thao tác pause thủ công trong 4s)
+- Tắt checkbox → reload tab để gỡ patch
+> Giới hạn cứng của trình duyệt (throttle tab nền) không gỡ được 100%, nhưng
+> video có audio thường vẫn chạy nền — và phần TikTok tự dừng là đã gỡ được.
+
 ### Diagnostics
 Nếu không lấy được, panel báo rõ:
 - `Capture: JSON(cap)/JSON(noCap)/SRT` — TikTok trả gì
@@ -62,16 +78,17 @@ Nếu không lấy được, panel báo rõ:
 
 ```
 tiktok_caption_ext/
-├── manifest.json     # MV3, quyền: activeTab, storage; host: tiktok + tiktokcdn
-├── background.js     # Service worker — fetch cross-origin cho content script
-├── content.js        # Nút nổi + panel + 3 phương án lấy phụ đề + parse SRT/VTT/JSON
+├── manifest.json     # MV3, quyền: scripting; host: tiktok + tiktokcdn + youtube + ytimg
+├── background.js     # Service worker — executeScript MAIN world + fetch cross-origin
+├── capture.js        # document_start — nhờ background inject interceptor
+├── content.js        # Nút nổi + panel + 4 nguồn lấy phụ đề + parse SRT/VTT/JSON
 └── icons/            # 16/48/128
 ```
 
 ## Giới hạn / Lưu ý
 
-- Chỉ hoạt động trên **trang TikTok web** (đã login là tốt nhất).
-- Chất lượng phụ đề = chất lượng caption TikTok cung cấp (auto-caption có thể
-  sai từ, giống YouTube).
+- Hoạt động trên **trang web TikTok + YouTube** (đã login là tốt nhất).
+- Chất lượng phụ đề = chất lượng caption nền tảng cung cấp (auto-caption có
+  thể sai từ).
 - TikTok đổi cấu trúc dữ liệu thường xuyên — nếu Phương án 1 ngừng hoạt động,
   dùng chế độ **ghi CC** (luôn hoạt động nếu video hiển thị phụ đề).

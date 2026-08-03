@@ -1,25 +1,42 @@
 {
   "manifest_version": 3,
-  "name": "TikTok Transcript - Lấy phụ đề",
-  "version": "1.0.0",
-  "description": "Lấy phụ đề miễn phí từ video TikTok ngay trong trình duyệt (đọc caption có sẵn của video).",
+  "name": "Transcript TikTok & YouTube - Lấy phụ đề",
+  "version": "1.1.0",
+  "description": "Lấy phụ đề miễn phí từ video TikTok và YouTube ngay trong trình duyệt (đọc caption có sẵn của video).",
   "permissions": ["activeTab", "storage", "scripting"],
   "host_permissions": [
     "https://www.tiktok.com/*",
     "https://*.tiktok.com/*",
-    "https://*.tiktokcdn.com/*"
+    "https://*.tiktokcdn.com/*",
+    "https://www.youtube.com/*",
+    "https://youtube.com/*",
+    "https://m.youtube.com/*",
+    "https://*.youtube.com/*",
+    "https://*.ytimg.com/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["https://www.tiktok.com/*", "https://*.tiktok.com/*"],
+      "matches": [
+        "https://www.tiktok.com/*",
+        "https://*.tiktok.com/*",
+        "https://www.youtube.com/*",
+        "https://youtube.com/*",
+        "https://m.youtube.com/*"
+      ],
       "js": ["capture.js"],
       "run_at": "document_start"
     },
     {
-      "matches": ["https://www.tiktok.com/*", "https://*.tiktok.com/*"],
+      "matches": [
+        "https://www.tiktok.com/*",
+        "https://*.tiktok.com/*",
+        "https://www.youtube.com/*",
+        "https://youtube.com/*",
+        "https://m.youtube.com/*"
+      ],
       "js": ["content.js"],
       "run_at": "document_idle"
     }
