@@ -52,9 +52,9 @@ Extension thu thập **tất cả** `captionInfos`, so khớp **video ID đang x
 trước → chưa rõ ID → nếu chỉ có video khác rõ ràng thì **không bắt nhầm**.
 Debug hiện trong panel: `🎬 Video: <id> (đang xem: <id>)`.
 
-### 🔓 Phát video khi tab ẩn
+### 🔓 Phát khi tab ẩn
 TikTok tự dừng video khi tab không còn hoạt động (chuyển tab, thu nhỏ, bị che).
-Trong panel bấm checkbox **"🔓 Phát video khi tab ẩn"**:
+Trong panel bấm checkbox **"🔓 Phát khi tab ẩn"**:
 - Báo `document.hidden`/`visibilityState`/`hasFocus` luôn là *visible* → TikTok
   không nhận ra tab ẩn → không tự dừng
 - **Tự phát lại** mỗi ~0.8s nếu video bị dừng không phải do bạn bấm pause
@@ -69,8 +69,18 @@ Trong panel bấm checkbox **"🔓 Phát video khi tab ẩn"**:
 - Dòng đã sửa được đánh dấu vàng; **Copy / tải .srt dùng bản đã sửa**
 - Chỉ trong phiên — đóng panel / reload là mất (chưa lưu vĩnh viễn)
 
-### ⏱ Ẩn mốc thời gian
-Checkbox **"⏱ Ẩn mốc thời gian"** trong panel: ẩn `[0:00.0 – 0:02.0]` ở các
+### ▶ Bám dòng phát
+Checkbox **"▶ Bám dòng phát"**: highlight + tự cuộn tới dòng ứng với
+`video.currentTime` (kiểu CC/karaoke). Khi đang gõ sửa nội dung thì **không tự
+cuộn** (tránh kéo dòng đi giữa chừng). Tắt/đóng panel → dừng hẳn.
+
+> **Chỉnh độ trễ highlight** (trong `content.js`):
+> - `SYNC_OFFSET_YOUTUBE_S = 2.0` — dời highlight sớm cho YouTube
+> - `SYNC_OFFSET_TIKTOK_S = 1.0` — dời highlight sớm cho TikTok
+> Nếu highlight nhảy **trễ** → tăng số; nhảy **sớm** → giảm số.
+
+### ⏱ Ẩn giờ
+Checkbox **"⏱ Ẩn giờ"** trong panel: ẩn `[0:00.0 – 0:02.0]` ở các
 đoạn và **không kèm timestamp khi Copy**. Lựa chọn được lưu nhớ (`chrome.storage`).
 > File `.srt` tải về vẫn luôn giữ timestamp (định dạng SRT bắt buộc).
 

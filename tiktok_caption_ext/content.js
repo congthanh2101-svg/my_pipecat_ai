@@ -238,12 +238,12 @@
     .ttcap-foot{display:flex;gap:8px;padding:10px 14px;border-top:1px solid #222;background:#1a1a1a}
     .ttcap-opt{display:flex;align-items:center;gap:8px;padding:8px 14px;border-top:1px solid #222;background:#151515;font-size:13px;color:#ccc}
     .ttcap-opt input{accent-color:#fe2c55;width:15px;height:15px;cursor:pointer}
-    .ttcap-opt-status{font-size:12px;color:#22c55e;margin-left:auto;white-space:nowrap}
     .ttcap-hide-time .ttcap-time{display:none}
     .ttcap-text{cursor:text}
     .ttcap-text:focus{outline:1px solid #fe2c55;border-radius:3px;background:#222}
     .ttcap-seg.edited{background:#2a1f12}
     .ttcap-seg.edited .ttcap-text{color:#ffd700}
+    .ttcap-seg.active{background:rgba(254,44,85,.15);box-shadow:inset 3px 0 0 #fe2c55}
     .ttcap-foot button{flex:1;padding:8px;border:none;border-radius:8px;font-weight:600;cursor:pointer;font-size:13px}
     .ttcap-copy{background:#fe2c55;color:#fff}
     .ttcap-dl{background:#333;color:#eee}
@@ -263,6 +263,13 @@
   let domCaptureActive = false;
   let unlockActive = false; // mở khóa phát khi tab ẩn (main-world script báo về)
   let hideTimes = false; // ẩn mốc thời gian trong panel/copy
+  let syncPlay = false; // đồng bộ dòng đang phát (highlight + auto-scroll)
+  let syncTimer = null;
+  const SYNC_INTERVAL_MS = 100; // poll video.currentTime (100ms = bám sát hơn)
+  // Dời highlight SỚM hơn N giây để khớp âm thanh — chỉnh RIÊNG từng nền tảng
+  const SYNC_OFFSET_YOUTUBE_S = 2.0; // YouTube: bạn đã chốt 2.0 là vừa
+  const SYNC_OFFSET_TIKTOK_S = 0.5;  // TikTok: 2.0 quá nhanh → thử 1.0, chỉnh tiếp nếu cần
+  const IS_YT = /youtube\.com/i.test(window.location.hostname);
 
   // Nạp lựa chọn đã lưu
   try {
@@ -288,14 +295,17 @@
       <div class="ttcap-body"></div>
       <div class="ttcap-opt">
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;width:100%">
-          <input type="checkbox" id="ttcap-unlock"> 🔓 Phát video khi tab ẩn
-          <span class="ttcap-opt-status" id="ttcap-unlock-status"></span>
+          <input type="checkbox" id="ttcap-unlock"> 🔓 Phát khi tab ẩn
         </label>
       </div>
       <div class="ttcap-opt">
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;width:100%">
-          <input type="checkbox" id="ttcap-hidetime"> ⏱ Ẩn mốc thời gian
-          <span class="ttcap-opt-status" id="ttcap-hidetime-status"></span>
+          <input type="checkbox" id="ttcap-hidetime"> ⏱ Ẩn giờ
+        </label>
+      </div>
+      <div class="ttcap-opt">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;width:100%">
+          <input type="checkbox" id="ttcap-sync"> ▶ Bám dòng phát
         </label>
       </div>
       <div class="ttcap-foot">
@@ -306,14 +316,12 @@
 
     // Toggle mở khóa phát khi tab ẩn
     const unlockCb = panel.querySelector('#ttcap-unlock');
-    const unlockStatus = panel.querySelector('#ttcap-unlock-status');
     unlockCb.checked = unlockActive;
-    unlockStatus.textContent = unlockActive ? '✅ đang bật' : '';
     unlockCb.onchange = () => {
       if (unlockCb.checked) {
         chrome.runtime.sendMessage({ type: 'INJECT_UNLOCK' }, (r) => {
-          if (r && r.ok) { unlockActive = true; unlockStatus.textContent = '✅ đang bật'; }
-          else { unlockStatus.textContent = '❌ lỗi'; unlockCb.checked = false; }
+          if (r && r.ok) { unlockActive = true; }
+          else { unlockCb.checked = false; } // lỗi → bỏ chọn
         });
       } else {
         location.reload(); // bỏ patch bằng cách reload tab
@@ -322,18 +330,24 @@
 
     // Toggle ẩn mốc thời gian (lưu chrome.storage)
     const timeCb = panel.querySelector('#ttcap-hidetime');
-    const timeStatus = panel.querySelector('#ttcap-hidetime-status');
     timeCb.checked = hideTimes;
     panel.classList.toggle('ttcap-hide-time', hideTimes);
-    timeStatus.textContent = hideTimes ? 'đang ẩn' : '';
     timeCb.onchange = () => {
       hideTimes = timeCb.checked;
       panel.classList.toggle('ttcap-hide-time', hideTimes);
-      timeStatus.textContent = hideTimes ? 'đang ẩn' : '';
       try { chrome.storage.local.set({ hideTimes }); } catch (e) {}
     };
 
-    panel.querySelector('.ttcap-close').onclick = () => { panel.remove(); panel = null; };
+    // Toggle đồng bộ dòng đang phát (highlight + auto-scroll)
+    const syncCb = panel.querySelector('#ttcap-sync');
+    syncCb.checked = syncPlay;
+    syncCb.onchange = () => {
+      syncPlay = syncCb.checked;
+      if (syncPlay) startSync(); else stopSync();
+    };
+    if (syncPlay) startSync(); // mở lại panel mà vẫn bật → chạy tiếp
+
+    panel.querySelector('.ttcap-close').onclick = () => { stopSync(); panel.remove(); panel = null; };
     document.documentElement.appendChild(panel);
     return panel;
   }
@@ -354,6 +368,8 @@
     for (const s of segments) {
       const row = document.createElement('div');
       row.className = 'ttcap-seg' + (s.edited ? ' edited' : '');
+      row.dataset.start = s.start; // dùng cho đồng bộ dòng đang phát
+      row.dataset.end = s.end;
       row.innerHTML = `<span class="ttcap-time">[${fmt(s.start)} – ${fmt(s.end)}]</span>
                        <span class="ttcap-text" title="Click để sửa nhanh — Enter lưu, Esc hủy"></span>`;
       const textEl = row.querySelector('.ttcap-text');
@@ -398,6 +414,41 @@
       a.click();
       URL.revokeObjectURL(a.href);
     };
+  }
+
+  // ── Đồng bộ dòng đang phát: highlight + auto-scroll theo video.currentTime ──
+  function syncActiveLine() {
+    if (!panel) return;
+    const v = document.querySelector('video');
+    if (!v) return;
+    const t = v.currentTime;
+    const rows = panel.querySelectorAll('.ttcap-seg');
+    let activeIdx = -1;
+    for (let i = 0; i < rows.length; i++) {
+      const st = parseFloat(rows[i].dataset.start);
+      const en = parseFloat(rows[i].dataset.end);
+      // Dời highlight SỚM theo offset của từng nền tảng (khớp caption với âm thanh)
+      const off = IS_YT ? SYNC_OFFSET_YOUTUBE_S : SYNC_OFFSET_TIKTOK_S;
+      if (t >= st - off && t < en - off) { activeIdx = i; break; }
+    }
+    for (let i = 0; i < rows.length; i++) rows[i].classList.toggle('active', i === activeIdx);
+    if (activeIdx >= 0) {
+      // Không cuộn khi đang sửa nội dung (tránh kéo dòng đi giữa chừng)
+      const ae = document.activeElement;
+      if (!(ae && ae.isContentEditable)) {
+        rows[activeIdx].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    }
+  }
+
+  function startSync() {
+    if (syncTimer) return;
+    syncTimer = setInterval(syncActiveLine, SYNC_INTERVAL_MS);
+  }
+
+  function stopSync() {
+    if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
+    if (panel) panel.querySelectorAll('.ttcap-seg.active').forEach((r) => r.classList.remove('active'));
   }
 
   function toSrtTime(sec) {
@@ -582,7 +633,7 @@
 
   // ── Xử lý khi bấm nút ──────────────────────────────────────────────────────
   btn.onclick = async () => {
-    if (panel) { panel.remove(); panel = null; return; }
+    if (panel) { stopSync(); panel.remove(); panel = null; return; }
     panel = buildPanel();
     const body = panel.querySelector('.ttcap-body');
     body.innerHTML = '<div class="ttcap-loading">⏳ Đang tìm phụ đề...</div>';
