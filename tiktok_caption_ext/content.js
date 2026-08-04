@@ -240,6 +240,10 @@
     .ttcap-opt input{accent-color:#fe2c55;width:15px;height:15px;cursor:pointer}
     .ttcap-opt-status{font-size:12px;color:#22c55e;margin-left:auto;white-space:nowrap}
     .ttcap-hide-time .ttcap-time{display:none}
+    .ttcap-text{cursor:text}
+    .ttcap-text:focus{outline:1px solid #fe2c55;border-radius:3px;background:#222}
+    .ttcap-seg.edited{background:#2a1f12}
+    .ttcap-seg.edited .ttcap-text{color:#ffd700}
     .ttcap-foot button{flex:1;padding:8px;border:none;border-radius:8px;font-weight:600;cursor:pointer;font-size:13px}
     .ttcap-copy{background:#fe2c55;color:#fff}
     .ttcap-dl{background:#333;color:#eee}
@@ -349,10 +353,34 @@
     }
     for (const s of segments) {
       const row = document.createElement('div');
-      row.className = 'ttcap-seg';
+      row.className = 'ttcap-seg' + (s.edited ? ' edited' : '');
       row.innerHTML = `<span class="ttcap-time">[${fmt(s.start)} – ${fmt(s.end)}]</span>
-                       <span class="ttcap-text"></span>`;
-      row.querySelector('.ttcap-text').textContent = s.text;
+                       <span class="ttcap-text" title="Click để sửa nhanh — Enter lưu, Esc hủy"></span>`;
+      const textEl = row.querySelector('.ttcap-text');
+      textEl.textContent = s.text;
+
+      // Sửa nhanh nội dung: click dòng → gõ → Enter lưu / Esc hủy / click chỗ khác lưu
+      textEl.contentEditable = 'true';
+      textEl.addEventListener('keydown', (e) => {
+        e.stopPropagation(); // chặn phím tắt video player (f/m/space...) khi đang sửa
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          textEl.blur();
+        } else if (e.key === 'Escape') {
+          textEl.textContent = s.text; // hủy thay đổi
+          textEl.blur();
+        }
+      });
+      textEl.addEventListener('blur', () => {
+        const newText = textEl.textContent.trim();
+        if (newText && newText !== s.text) {
+          s.text = newText; // cập nhật nguồn → Copy/SRT dùng bản đã sửa
+          s.edited = true;
+          row.classList.add('edited');
+        }
+        textEl.textContent = s.text; // chuẩn hóa (bỏ dư khoảng trắng)
+      });
+
       body.appendChild(row);
     }
     panel.querySelector('.ttcap-copy').onclick = () => {

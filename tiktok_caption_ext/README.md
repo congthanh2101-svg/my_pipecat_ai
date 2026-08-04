@@ -63,6 +63,12 @@ Trong panel bấm checkbox **"🔓 Phát video khi tab ẩn"**:
 > Giới hạn cứng của trình duyệt (throttle tab nền) không gỡ được 100%, nhưng
 > video có audio thường vẫn chạy nền — và phần TikTok tự dừng là đã gỡ được.
 
+### ✏️ Sửa nhanh nội dung
+**Click vào một dòng** để sửa chữa lỗi auto-caption ngay trong panel:
+- **Enter** (hoặc click chỗ khác) → lưu; **Esc** → hủy
+- Dòng đã sửa được đánh dấu vàng; **Copy / tải .srt dùng bản đã sửa**
+- Chỉ trong phiên — đóng panel / reload là mất (chưa lưu vĩnh viễn)
+
 ### ⏱ Ẩn mốc thời gian
 Checkbox **"⏱ Ẩn mốc thời gian"** trong panel: ẩn `[0:00.0 – 0:02.0]` ở các
 đoạn và **không kèm timestamp khi Copy**. Lựa chọn được lưu nhớ (`chrome.storage`).
