@@ -84,6 +84,11 @@ Checkbox **"⏱ Ẩn giờ"** trong panel: ẩn `[0:00.0 – 0:02.0]` ở các
 đoạn và **không kèm timestamp khi Copy**. Lựa chọn được lưu nhớ (`chrome.storage`).
 > File `.srt` tải về vẫn luôn giữ timestamp (định dạng SRT bắt buộc).
 
+### ⟳ Refresh phụ đề
+Nút **⟳** (góc phải footer): tải lại phụ đề của **video đang xem** — dùng khi
+qua video khác (SPA) mà panel vẫn hiện phụ đề cũ, hoặc muốn refresh lại caption.
+> Lưu ý: Refresh tải caption mới → **mất bản sửa nội dung** trong phiên.
+
 ### 🖱️ Kéo di chuyển panel
 Giữ chuột vào **thanh tiêu đề "📝 Lấy phụ đề"** và kéo panel tới vị trí bất kỳ
 trong trình duyệt (tự clamp trong màn hình). Nút **✕** vẫn đóng bình thường.

@@ -250,6 +250,8 @@
     .ttcap-copy{background:#fe2c55;color:#fff}
     .ttcap-dl{background:#333;color:#eee}
     .ttcap-dom{background:#25f4ee;color:#000}
+    .ttcap-refresh{flex:0 0 auto;background:#333;color:#eee;padding:8px 10px}
+    .ttcap-refresh:disabled{opacity:.5;cursor:wait}
   `;
   const style = document.createElement('style');
   style.textContent = css;
@@ -314,6 +316,7 @@
         <button class="ttcap-copy">📋 Copy</button>
         <button class="ttcap-dl">⬇ Tải .srt</button>
         <button class="ttcap-dom">🎬 Bắt đầu ghi (CC)</button>
+        <button class="ttcap-refresh" title="Tải lại phụ đề (video đang xem)">⟳</button>
       </div>`;
 
     // Toggle mở khóa phát khi tab ẩn
@@ -682,11 +685,11 @@
     panel.querySelector('.ttcap-dom').textContent = '⏹ Dừng ghi';
   }
 
-  // ── Xử lý khi bấm nút ──────────────────────────────────────────────────────
-  btn.onclick = async () => {
-    if (panel) { stopSync(); panel.remove(); panel = null; return; }
-    panel = buildPanel();
+  // ── Tải/tải lại phụ đề cho video hiện tại + render ────────────────────────
+  async function reloadCaptions() {
     const body = panel.querySelector('.ttcap-body');
+    const refreshBtn = panel.querySelector('.ttcap-refresh');
+    if (refreshBtn) { refreshBtn.disabled = true; refreshBtn.textContent = '…'; }
     body.innerHTML = '<div class="ttcap-loading">⏳ Đang tìm phụ đề...</div>';
 
     const found = await tryCaptions();
@@ -699,25 +702,35 @@
         found.segs,
         `Lấy từ phụ đề có sẵn của video (${found.lang || 'auto'}). ${dbgStr}${vidStr}`
       );
-      return;
-    }
-
-    // Không có → DOM capture + hiển thị debug để báo cáo
-    const dbgStr = found
-      ? `[int:${found.dbg.int ? '✓' : '✗'} · net:${found.dbg.network} · rehy:${found.dbg.rehydration} · cache:${found.dbg.cache}]`
-      : '';
-    const curId = currentVideoId();
-    const ctxStr = found && found.contexts && found.contexts.length
-      ? `\nContexts tìm được: ${found.contexts.map((c) => c.videoId || '?').join(', ')}`
-      : '';
-    const capSum = found && found.captureSummary ? `\nCapture: ${found.captureSummary}` : '';
-    const noCapStr = found && found.noCaptionReason
-      ? `\n⚠️ TikTok báo: video không có phụ đề (noCaptionReason: ${found.noCaptionReason}).`
-      : '';
-    body.innerHTML = `<div class="ttcap-note">
+    } else {
+      // Không có → hiển thị debug để báo cáo
+      const dbgStr = found
+        ? `[int:${found.dbg.int ? '✓' : '✗'} · net:${found.dbg.network} · rehy:${found.dbg.rehydration} · cache:${found.dbg.cache}]`
+        : '';
+      const curId = currentVideoId();
+      const ctxStr = found && found.contexts && found.contexts.length
+        ? `\nContexts tìm được: ${found.contexts.map((c) => c.videoId || '?').join(', ')}`
+        : '';
+      const capSum = found && found.captureSummary ? `\nCapture: ${found.captureSummary}` : '';
+      const noCapStr = found && found.noCaptionReason
+        ? `\n⚠️ TikTok báo: video không có phụ đề (noCaptionReason: ${found.noCaptionReason}).`
+        : '';
+      body.innerHTML = `<div class="ttcap-note">
         Không lấy được phụ đề sẵn ${dbgStr}. Video đang xem: ${curId || '(không xác định)'}.${ctxStr}${capSum}${noCapStr}
         Video có thể không có caption track, HOẶC chưa bật CC.
         Cách dùng chế độ ghi CC: bật phụ đề (CC) trên video, nhấn
         "🎬 Bắt đầu ghi (CC)" rồi CHƠI video để ghi lại lời thoại.</div>`;
+    }
+
+    if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = '⟳'; }
+  }
+
+  // ── Xử lý khi bấm nút ──────────────────────────────────────────────────────
+  btn.onclick = async () => {
+    if (panel) { stopSync(); panel.remove(); panel = null; return; }
+    panel = buildPanel();
+    // Nút ⟳ Refresh: tải lại phụ đề (dùng khi đổi video mới / muốn refresh)
+    panel.querySelector('.ttcap-refresh').onclick = reloadCaptions;
+    await reloadCaptions();
   };
 })();
