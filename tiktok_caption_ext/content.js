@@ -227,7 +227,7 @@
     .ttcap-panel{position:fixed;top:56px;right:16px;z-index:99999;width:400px;max-width:calc(100vw - 32px);
       max-height:70vh;background:#111;color:#eee;border:1px solid #333;border-radius:12px;box-shadow:0 8px 40px rgba(0,0,0,.5);
       display:flex;flex-direction:column;font:14px/1.5 system-ui;overflow:hidden}
-    .ttcap-head{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid #222;font-weight:600;background:#1a1a1a}
+    .ttcap-head{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid #222;font-weight:600;background:#1a1a1a;cursor:move;user-select:none;touch-action:none}
     .ttcap-close{margin-left:auto;background:none;border:none;color:#aaa;font-size:18px;cursor:pointer;line-height:1}
     .ttcap-body{overflow:auto;padding:12px 14px;flex:1}
     .ttcap-seg{display:flex;gap:10px;margin-bottom:6px;padding:6px 8px;border-radius:6px;background:#1a1a1a}
@@ -239,6 +239,8 @@
     .ttcap-opt{display:flex;align-items:center;gap:8px;padding:8px 14px;border-top:1px solid #222;background:#151515;font-size:13px;color:#ccc}
     .ttcap-opt input{accent-color:#fe2c55;width:15px;height:15px;cursor:pointer}
     .ttcap-hide-time .ttcap-time{display:none}
+    .ttcap-dragging{opacity:.9}
+    .ttcap-dragging *{user-select:none!important}
     .ttcap-text{cursor:text}
     .ttcap-text:focus{outline:1px solid #fe2c55;border-radius:3px;background:#222}
     .ttcap-seg.edited{background:#2a1f12}
@@ -349,6 +351,7 @@
 
     panel.querySelector('.ttcap-close').onclick = () => { stopSync(); panel.remove(); panel = null; };
     document.documentElement.appendChild(panel);
+    makePanelDraggable(panel); // kéo di chuyển panel
     return panel;
   }
 
@@ -449,6 +452,54 @@
   function stopSync() {
     if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
     if (panel) panel.querySelectorAll('.ttcap-seg.active').forEach((r) => r.classList.remove('active'));
+  }
+
+  // ── Kéo panel di chuyển (thanh tiêu đề) ────────────────────────────────────
+  function makePanelDraggable(p) {
+    const head = p.querySelector('.ttcap-head');
+    let dragging = false;
+    let startX = 0, startY = 0, origLeft = 0, origTop = 0;
+
+    head.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('.ttcap-close')) return; // nút ✕ → không kéo
+      // Lần đầu kéo: đổi right → left để định vị được
+      if (!p.style.left) {
+        const r = p.getBoundingClientRect();
+        p.style.left = r.left + 'px';
+        p.style.top = r.top + 'px';
+        p.style.right = 'auto';
+      }
+      dragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      origLeft = parseFloat(p.style.left);
+      origTop = parseFloat(p.style.top);
+      try { head.setPointerCapture(e.pointerId); } catch (err) {}
+      p.classList.add('ttcap-dragging');
+      e.preventDefault();
+    });
+
+    head.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      let left = origLeft + (e.clientX - startX);
+      let top = origTop + (e.clientY - startY);
+      // Clamp trong viewport
+      const pw = p.offsetWidth;
+      const ph = p.offsetHeight;
+      left = Math.max(0, Math.min(left, window.innerWidth - pw));
+      top = Math.max(0, Math.min(top, window.innerHeight - ph));
+      p.style.left = left + 'px';
+      p.style.top = top + 'px';
+    });
+
+    const stop = (e) => {
+      if (!dragging) return;
+      dragging = false;
+      p.classList.remove('ttcap-dragging');
+      try { head.releasePointerCapture(e.pointerId); } catch (err) {}
+    };
+    head.addEventListener('pointerup', stop);
+    head.addEventListener('pointercancel', stop);
   }
 
   function toSrtTime(sec) {

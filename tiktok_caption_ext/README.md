@@ -84,6 +84,11 @@ Checkbox **"⏱ Ẩn giờ"** trong panel: ẩn `[0:00.0 – 0:02.0]` ở các
 đoạn và **không kèm timestamp khi Copy**. Lựa chọn được lưu nhớ (`chrome.storage`).
 > File `.srt` tải về vẫn luôn giữ timestamp (định dạng SRT bắt buộc).
 
+### 🖱️ Kéo di chuyển panel
+Giữ chuột vào **thanh tiêu đề "📝 Lấy phụ đề"** và kéo panel tới vị trí bất kỳ
+trong trình duyệt (tự clamp trong màn hình). Nút **✕** vẫn đóng bình thường.
+Vị trí theo phiên — mở lại panel về góc mặc định.
+
 ### Diagnostics
 Nếu không lấy được, panel báo rõ:
 - `Capture: JSON(cap)/JSON(noCap)/SRT` — TikTok trả gì
