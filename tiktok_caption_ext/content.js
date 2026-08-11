@@ -269,7 +269,9 @@
   let hideTimes = false; // ẩn mốc thời gian trong panel/copy
   let syncPlay = false; // đồng bộ dòng đang phát (highlight + auto-scroll)
   let syncTimer = null;
+  let lastSyncTime = null; // currentTime lần poll trước — để phát hiện video loop/restart
   const SYNC_INTERVAL_MS = 100; // poll video.currentTime (100ms = bám sát hơn)
+  const SYNC_PAGE_ROWS = 6;     // mỗi lần chạm đáy → cuộn xuống 6 dòng
   // Dời highlight SỚM hơn N giây để khớp âm thanh — chỉnh RIÊNG từng nền tảng
   const SYNC_OFFSET_YOUTUBE_S = 2.0; // YouTube: bạn đã chốt 2.0 là vừa
   const SYNC_OFFSET_TIKTOK_S = 0.5;  // TikTok: 2.0 quá nhanh → thử 1.0, chỉnh tiếp nếu cần
@@ -284,6 +286,21 @@
   window.addEventListener('message', (e) => {
     if (e.data && e.data.__tt_unlock) unlockActive = true;
   });
+
+  // Chặn phím tắt video player khi đang sửa ô nội dung (contentEditable).
+  // YouTube bắt keydown/keyup trên document ở CAPTURE phase — chạy TRƯỚC
+  // listener ở target, nên e.stopPropagation() trong ô sửa là quá trễ.
+  // → Bắt capture trên window (chạy trước document capture) + stopImmediatePropagation.
+  // KHÔNG preventDefault để vẫn gõ được chữ. Enter/Escape/Tab để ô sửa xử lý
+  // (Enter lưu, Esc hủy, Tab blur).
+  function blockPlayerShortcutsWhileEditing(e) {
+    const ce = document.activeElement;
+    if (!(ce && ce.isContentEditable && ce.closest('.ttcap-panel'))) return;
+    if (e.key === 'Enter' || e.key === 'Escape' || e.key === 'Tab') return;
+    e.stopImmediatePropagation();
+  }
+  window.addEventListener('keydown', blockPlayerShortcutsWhileEditing, true);
+  window.addEventListener('keyup', blockPlayerShortcutsWhileEditing, true);
 
   function fmt(s) {
     const m = Math.floor(s / 60);
@@ -428,6 +445,15 @@
     const v = document.querySelector('video');
     if (!v) return;
     const t = v.currentTime;
+
+    // Video kết thúc & phát lại (loop/restart): currentTime tụt ngược → đưa
+    // panel về đầu để bắt đầu lại từ dòng 1
+    if (lastSyncTime !== null && t < lastSyncTime - 1.5) {
+      const body = panel.querySelector('.ttcap-body');
+      if (body && body.scrollTop > 0) body.scrollTop = 0;
+    }
+    lastSyncTime = t;
+
     const rows = panel.querySelectorAll('.ttcap-seg');
     let activeIdx = -1;
     for (let i = 0; i < rows.length; i++) {
@@ -442,13 +468,36 @@
       // Không cuộn khi đang sửa nội dung (tránh kéo dòng đi giữa chừng)
       const ae = document.activeElement;
       if (!(ae && ae.isContentEditable)) {
-        rows[activeIdx].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        scrollToActive(rows[activeIdx]);
       }
+    }
+  }
+
+  // Cuộn theo TRANG: panel đứng yên cho tới khi dòng active CHẠM ĐÁY, lúc đó
+  // nhảy xuống 6 dòng rồi lại đứng yên → nội dung ít biến động, dễ theo dõi.
+  function scrollToActive(row) {
+    const body = panel.querySelector('.ttcap-body');
+    if (!body) return;
+    const bodyRect = body.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    // Vẫn nằm trong viewport (chưa chạm đáy) → không cuộn
+    if (rowRect.bottom <= bodyRect.bottom - 2) return;
+
+    const rowH = row.offsetHeight || 40;
+    const pageH = SYNC_PAGE_ROWS * rowH;
+    if (rowRect.bottom - bodyRect.bottom > pageH) {
+      // Seek xa (nhảy tới giữa video) → đưa dòng active về sát đáy 1 lần
+      const relTop = rowRect.top - bodyRect.top + body.scrollTop;
+      body.scrollTop = Math.max(0, relTop - body.clientHeight + rowH);
+    } else {
+      // Chạm đáy bình thường → cuộn xuống đúng 6 dòng
+      body.scrollTop += pageH;
     }
   }
 
   function startSync() {
     if (syncTimer) return;
+    lastSyncTime = null; // bắt đầu theo dõi mới
     syncTimer = setInterval(syncActiveLine, SYNC_INTERVAL_MS);
   }
 

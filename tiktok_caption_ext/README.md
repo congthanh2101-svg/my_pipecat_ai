@@ -70,9 +70,13 @@ Trong panel bấm checkbox **"🔓 Phát khi tab ẩn"**:
 - Chỉ trong phiên — đóng panel / reload là mất (chưa lưu vĩnh viễn)
 
 ### ▶ Bám dòng phát
-Checkbox **"▶ Bám dòng phát"**: highlight + tự cuộn tới dòng ứng với
-`video.currentTime` (kiểu CC/karaoke). Khi đang gõ sửa nội dung thì **không tự
-cuộn** (tránh kéo dòng đi giữa chừng). Tắt/đóng panel → dừng hẳn.
+Checkbox **"▶ Bám dòng phát"**: highlight dòng theo `video.currentTime` và
+**cuộn theo trang** — panel **đứng yên** cho tới khi dòng đang phát **chạm đáy**
+thì nhảy xuống **6 dòng** rồi lại đứng yên → nội dung ít biến động, dễ theo dõi.
+Khi đang gõ sửa nội dung thì **không tự cuộn**. Tắt/đóng panel → dừng hẳn.
+> Số dòng mỗi lần nhảy = `SYNC_PAGE_ROWS` (mặc định 6) trong `content.js`.
+> **Video ngắn tự phát lại (loop)**: khi `currentTime` tụt ngược về đầu, panel
+> **tự cuộn về dòng 1** để bắt đầu lại từ đầu.
 
 > **Chỉnh độ trễ highlight** (trong `content.js`):
 > - `SYNC_OFFSET_YOUTUBE_S = 2.0` — dời highlight sớm cho YouTube
