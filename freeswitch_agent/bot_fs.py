@@ -6,7 +6,7 @@ Rewrite based on pipecat-examples/websocket pattern:
 - WorkerRunner lifecycle (instead of manual TaskManager)
 - worker.rtvi.event_handler("on_client_ready") for RTVI greetingPiperVoice
 
-STT: Whisper (large-v3) / VietASR (Zipformer) / Gipformer (Zipformer) | LLM: Ollama/Deepseek | TTS: Piper/OmniVoice
+STT: Whisper (large-v3) / VietASR (Zipformer) / Gipformer (Zipformer) | LLM: Ollama/Deepseek | TTS: Piper/OmniVoice/VieNeu
 
 Endpoints:
   /audio-stream   → L16 PCM (FreeSWITCH mod_audio_stream / browser)
@@ -25,6 +25,7 @@ import json
 import os
 import re
 import time
+import uuid
 import wave
 from pathlib import Path
 from typing import Any
@@ -85,6 +86,7 @@ from hallucination_filter import HallucinationFilter
 
 from pronunciation_normalizer import PronunciationNormalizer
 from omnivoice_tts import OmniVoiceTTSService
+from vieneu_tts import VieNeuTTSService
 from vietasr_stt import VietASRSTTService
 from gipformer_stt import GipformerSTTService
 from call_logger import CallLogger, extract_conversation
@@ -236,7 +238,10 @@ class DebugWhisperSTTService(WhisperSTTService):
                 "loại bỏ (hoặc Whisper không nhận diện được segment nào)."
             )
 
-load_dotenv(override=True)
+# override=False (mặc định): env đã set sẵn (command line / systemd) thắng .env.
+# .env chỉ cung cấp default — nếu không, .env sẽ ghi đè mọi biến command-line
+# (vd: TTS_ENGINE=vieneu trên lệnh bị .env TTS_ENGINE=omnivoice nuốt mất).
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Config
@@ -259,7 +264,9 @@ OLLAMA_EXTRA = os.getenv("OLLAMA_EXTRA", '{"extra_body": {"options": {"think": f
 STT_LLM_MODEL = os.getenv("STT_LLM_MODEL", "qwen3:4b-instruct")
 # Download YouTube cho trang /stt-test (POST /stt/url)
 YTDLP_MAX_FILESIZE = int(os.getenv("YTDLP_MAX_FILESIZE", str(50 * 1024 * 1024)))  # 50MB
-YTDLP_MAX_DURATION = int(os.getenv("YTDLP_MAX_DURATION", "600"))  # 10 phút
+YTDLP_MAX_DURATION = int(os.getenv("YTDLP_MAX_DURATION", "600"))  # 10 phút (audio/STT)
+# Trang /yt-download — tải video YouTube (cho phép video dài hơn)
+YTDLP_VIDEO_MAX_DURATION = int(os.getenv("YTDLP_VIDEO_MAX_DURATION", "1800"))  # 30 phút
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
@@ -275,6 +282,13 @@ OMNIVOICE_MODEL = os.getenv("OMNIVOICE_MODEL", "k2-fsa/OmniVoice")
 OMNIVOICE_NUM_STEP = int(os.getenv("OMNIVOICE_NUM_STEP", "32"))
 # OmniVoice API server (standalone) — dùng cho trang /tts-test
 OMNIVOICE_API_URL = os.getenv("OMNIVOICE_API_URL", "http://localhost:8001").rstrip("/")
+
+# VieNeu-TTS (v3 Turbo, ONNX CPU): 14 giọng có sẵn + 3 style
+VIENEU_VOICE = os.getenv("VIENEU_VOICE", "Trúc Ly")  # xem danh sách: vieneu.list_preset_voices()
+VIENEU_STYLE = os.getenv("VIENEU_STYLE", "tu_nhien")  # tu_nhien | tin_tuc | doc_truyen
+VIENEU_BACKEND = os.getenv("VIENEU_BACKEND", "onnx")  # onnx (CPU) | v3turbo (GPU torch)
+VIENEU_PRECISION = os.getenv("VIENEU_PRECISION", "int8")  # int8 (mặc định) | fp32
+VIENEU_CHUNK_DURATION_S = float(os.getenv("VIENEU_CHUNK_DURATION_S", "0.25"))
 
 # FreeSWITCH Rest API — dùng cho tool calling (chuyển cuộc gọi đến queue tổng đài)
 FS_API_BASE_URL = os.getenv("FS_API_BASE_URL", "http://192.168.1.153:8443/api/v1")
@@ -1142,6 +1156,9 @@ def create_services() -> tuple:
         if not Path(OMNIVOICE_VOICE_PROFILE).exists():
             logger.error(f"❌ OmniVoice profile not found: {OMNIVOICE_VOICE_PROFILE}")
             return None, None, None
+    elif TTS_ENGINE == "vieneu":
+        # VieNeu-TTS tự load model riêng (lazy khi pipeline chạy) — không cần Piper
+        logger.info(f"🔊 TTS: VieNeu-TTS v3 Turbo (voice={VIENEU_VOICE}, style={VIENEU_STYLE})")
     else:
         voice_path = VOICES_DIR / "vi_VN-vais1000-medium.onnx"
         if not voice_path.exists():
@@ -1220,7 +1237,7 @@ def create_services() -> tuple:
             retry_on_timeout=True,       # ⬅️ thêm: retry nếu timeout
         )
 
-    # TTS: tuỳ chọn engine (piper mặc định, omnivoice chất lượng cao)
+    # TTS: tuỳ chọn engine (piper mặc định, omnivoice/vieneu chất lượng cao)
     if TTS_ENGINE == "omnivoice":
         tts = OmniVoiceTTSService(
             voice_prompt_path=OMNIVOICE_VOICE_PROFILE,
@@ -1230,6 +1247,15 @@ def create_services() -> tuple:
             dtype="float16",
             num_step=OMNIVOICE_NUM_STEP,
         )
+    elif TTS_ENGINE == "vieneu":
+        # VieNeu-TTS v3 Turbo (14 giọng có sẵn, 3 style) — ONNX CPU mặc định
+        tts = VieNeuTTSService(
+            voice=VIENEU_VOICE,
+            style=VIENEU_STYLE,
+            backend=VIENEU_BACKEND,
+            precision=VIENEU_PRECISION,
+        )
+        logger.info(f"🔊 TTS: VieNeu-TTS (voice={VIENEU_VOICE}, style={VIENEU_STYLE}, backend={VIENEU_BACKEND})")
     else:
         # Piper TTS (mặc định)
         tts = PiperTTSService(
@@ -2265,6 +2291,50 @@ def _ytdlp_download_audio(url: str) -> tuple[str, dict]:
     return str(files[0]), info
 
 
+def _ytdlp_download_video(url: str, quality: str = "best") -> tuple[str, dict]:
+    """Tải VIDEO YouTube bằng yt-dlp (bestvideo+bestaudio → merge MP4).
+
+    - quality: 'best' | '720' | '480' | '360' (giới hạn chiều cao)
+    - Giới hạn YTDLP_VIDEO_MAX_DURATION (30 phút mặc định)
+    - Trả về (path_video, info); file trong thư mục temp (caller tự dọn)
+    """
+    import tempfile
+    import yt_dlp
+
+    info = _ytdlp_extract_info(url)
+    dur = info.get("duration") or 0
+    if dur > YTDLP_VIDEO_MAX_DURATION:
+        raise HTTPException(400, f"Video quá dài ({dur}s > {YTDLP_VIDEO_MAX_DURATION}s giới hạn)")
+
+    outdir = tempfile.mkdtemp(prefix="ytdlp_vid_")
+    height = {"720": "720", "480": "480", "360": "360"}.get(quality)
+    if height:
+        fmt = f"bv*[height<={height}]+ba/b[height<={height}]"
+    else:
+        fmt = "bv*+ba/b"  # best: video+audio tốt nhất, merge bằng ffmpeg
+    opts = {
+        "format": fmt,
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 15,
+        "retries": 3,
+        "outtmpl": str(Path(outdir) / "video.%(ext)s"),
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.extract_info(url, download=True)
+    except yt_dlp.utils.DownloadError as e:
+        raise HTTPException(400, f"yt-dlp tải thất bại: {str(e)[:200]}")
+
+    files = [f for f in Path(outdir).iterdir() if f.is_file()]
+    files.sort(key=lambda f: f.stat().st_size, reverse=True)  # ưu tiên file lớn nhất (video đã merge)
+    if not files:
+        raise HTTPException(502, "yt-dlp tải xong nhưng không tìm thấy file video")
+    return str(files[0]), info
+
+
 def _ytdlp_extract_info(url: str) -> dict:
     """Lấy thông tin video YouTube (không tải), kiểm tra giới hạn duration/title."""
     import yt_dlp
@@ -2475,6 +2545,76 @@ async def stt_transcribe_url(
         return result
     finally:
         shutil.rmtree(Path(audio_path).parent, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# /yt-download — tải video YouTube bằng yt-dlp (server-side)
+# ---------------------------------------------------------------------------
+_yt_download_files: dict[str, str] = {}  # token → path (xóa sau khi serve)
+
+
+@app.get("/yt-download")
+async def yt_download_ui():
+    path = CLIENT_HTML / "yt-download.html"
+    return HTMLResponse(path.read_text(encoding="utf-8")) if path.exists() else HTMLResponse("Not found", 404)
+
+
+class YTDownloadRequest(BaseModel):
+    url: str = Field(..., description="Link YouTube")
+    quality: str = Field("best", description="best | 720 | 480 | 360")
+
+
+@app.post("/yt-download")
+async def yt_download(body: YTDownloadRequest):
+    """Dán link YouTube → yt-dlp tải video (MP4, merge bằng ffmpeg) → link tải."""
+    from urllib.parse import urlparse
+
+    # SSRF guard: chỉ cho phép YouTube
+    host = (urlparse(body.url).netloc or "").lower().replace("www.", "")
+    if host not in _YOUTUBE_HOSTS:
+        raise HTTPException(400, f"Chỉ hỗ trợ link YouTube, nhận được: '{host or body.url[:40]}'")
+
+    quality = (body.quality or "best").lower()
+    if quality not in ("best", "720", "480", "360"):
+        raise HTTPException(400, "quality phải là best | 720 | 480 | 360")
+
+    logger.info(f"🎬 YT Download: {body.url} (quality={quality})")
+    loop = asyncio.get_event_loop()
+    video_path, info = await loop.run_in_executor(None, _ytdlp_download_video, body.url, quality)
+    try:
+        token = uuid.uuid4().hex
+        _yt_download_files[token] = video_path
+        name = Path(video_path).name
+        return {
+            "success": True,
+            "filename": name,
+            "title": info.get("title", ""),
+            "duration_s": info.get("duration") or 0,
+            "size_bytes": Path(video_path).stat().st_size,
+            "download_url": f"/yt-download/file/{token}",
+        }
+    except Exception:
+        shutil.rmtree(Path(video_path).parent, ignore_errors=True)
+        raise
+
+
+@app.get("/yt-download/file/{token}")
+async def yt_download_file(token: str):
+    """Phục vụ file đã tải + dọn dẹp sau khi stream xong (1 lần)."""
+    from fastapi.responses import FileResponse
+    from starlette.background import BackgroundTask
+
+    path = _yt_download_files.pop(token, None)
+    if not path or not Path(path).exists():
+        raise HTTPException(404, "File không tồn tại hoặc đã hết hạn")
+    p = Path(path)
+
+    def _cleanup():
+        import shutil
+        shutil.rmtree(p.parent, ignore_errors=True)
+
+    return FileResponse(str(p), media_type="video/mp4", filename=p.name,
+                        background=BackgroundTask(_cleanup))
 
 
 @app.get("/pipecat-client2")

@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YT Download - Tải video YouTube</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0f0f1a; color: #e0e0e0; min-height: 100vh; display: flex; justify-content: center; padding: 20px; }
+    .container { max-width: 640px; width: 100%; }
+    h1 { font-size: 1.5rem; margin: 20px 0; color: #fff; }
+    .card { background: #1a1a2e; border: 1px solid #2d2d4a; border-radius: 12px; padding: 24px; margin-bottom: 16px; }
+    .card-title { font-size: 1rem; font-weight: 600; margin-bottom: 16px; color: #a5b4fc; }
+
+    .form-row { margin-top: 14px; }
+    .form-row .label { font-size: 0.8rem; color: #9ca3af; margin-bottom: 6px; }
+    input[type="text"], select { width: 100%; background: #0f0f1a; border: 1px solid #2d2d4a; border-radius: 8px; color: #e0e0e0; padding: 10px 12px; font-size: 0.95rem; outline: none; }
+    input[type="text"]:focus, select:focus { border-color: #6366f1; }
+
+    .btn { padding: 10px 24px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 0.95rem; transition: 0.2s; }
+    .btn-primary { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff; }
+    .btn-primary:hover { opacity: 0.9; }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-row { margin-top: 16px; display: flex; gap: 8px; align-items: center; }
+
+    .status { margin-top: 12px; padding: 12px; border-radius: 8px; display: none; }
+    .status.show { display: block; }
+    .status.loading { background: rgba(99,102,241,0.1); border: 1px solid #6366f1; }
+    .status.success { background: rgba(34,197,94,0.1); border: 1px solid #22c55e; }
+    .status.error { background: rgba(239,68,68,0.1); border: 1px solid #ef4444; }
+    .status .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #6366f1; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 8px; vertical-align: middle; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .result { margin-top: 12px; background: #0f0f1a; border: 1px solid #2d2d4a; border-radius: 8px; padding: 12px; font-size: 0.9rem; line-height: 1.6; display: none; }
+    .result.show { display: block; }
+    .result b { color: #a5b4fc; }
+    .dl-link { display: inline-block; margin-top: 8px; color: #22c55e; font-weight: 600; text-decoration: none; }
+    .dl-link:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>⬇️ Tải video YouTube (server yt-dlp)</h1>
+
+  <div class="card">
+    <div class="form-row">
+      <div class="label">🔗 Link YouTube</div>
+      <input type="text" id="url-input" placeholder="https://www.youtube.com/watch?v=... hoặc https://youtu.be/...">
+    </div>
+
+    <div class="form-row">
+      <div class="label">Chất lượng</div>
+      <select id="quality-select">
+        <option value="best">Tốt nhất (bestvideo+audio, merge MP4)</option>
+        <option value="720">720p</option>
+        <option value="480">480p</option>
+        <option value="360">360p</option>
+      </select>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" id="submit-btn" disabled>⬇️ Tải video</button>
+    </div>
+
+    <div class="status" id="status"></div>
+    <div class="result" id="result"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">ℹ️ Lưu ý</div>
+    <div style="font-size:0.9rem;color:#9ca3af;line-height:1.7">
+      - Tải video bằng <b>yt-dlp</b> trên server (xử lý tốt hơn tải từ trình duyệt).<br>
+      - Video dài có thể mất 1-2 phút để tải + merge.<br>
+      - Giới hạn: video ≤ 30 phút.<br>
+      - Chỉ tải link YouTube hợp lệ.
+    </div>
+  </div>
+</div>
+
+<script>
+const urlInput = document.getElementById('url-input');
+const qualitySelect = document.getElementById('quality-select');
+const submitBtn = document.getElementById('submit-btn');
+const statusDiv = document.getElementById('status');
+const resultDiv = document.getElementById('result');
+
+urlInput.addEventListener('input', () => {
+  submitBtn.disabled = !urlInput.value.trim();
+  hideStatus();
+  resultDiv.classList.remove('show');
+});
+
+submitBtn.addEventListener('click', async () => {
+  const url = urlInput.value.trim();
+  if (!url) return;
+
+  submitBtn.disabled = true;
+  showStatus('loading', '⏳ Server đang tải video + merge... (video dài có thể mất 1-2 phút)');
+
+  try {
+    const resp = await fetch('/yt-download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, quality: qualitySelect.value }),
+    });
+    const data = await resp.json();
+
+    if (!resp.ok || !data.success) {
+      showStatus('error', data.detail || data.error || ('HTTP ' + resp.status));
+      submitBtn.disabled = false;
+      return;
+    }
+
+    showStatus('success', '✅ Tải xong!');
+    const mb = (data.size_bytes / 1024 / 1024).toFixed(1);
+    const dur = data.duration_s ? ` · ${Math.round(data.duration_s / 60)} phút` : '';
+    resultDiv.innerHTML = `
+      <b>${data.title || data.filename}</b><br>
+      File: ${data.filename} · ${mb} MB${dur}<br>
+      <a class="dl-link" href="${data.download_url}" id="dl-a">⬇️ Tải xuống file (${mb} MB)</a>`;
+    resultDiv.classList.add('show');
+
+    // Tự động bắt đầu tải xuống
+    document.getElementById('dl-a').click();
+    submitBtn.disabled = false;
+  } catch (e) {
+    showStatus('error', 'Lỗi kết nối: ' + e.message);
+    submitBtn.disabled = false;
+  }
+});
+
+function showStatus(type, msg) {
+  statusDiv.className = 'status show ' + type;
+  if (type === 'loading') {
+    statusDiv.innerHTML = `<span class="spinner"></span> ${msg}`;
+  } else {
+    statusDiv.textContent = msg;
+  }
+}
+
+function hideStatus() {
+  statusDiv.className = 'status';
+}
+</script>
+</body>
+</html>
