@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TikTok Downloader — Tải video TikTok không logo, miễn phí</title>
+  <meta name="description" content="Tải video TikTok không watermark (logo), tải nhạc MP3 từ TikTok miễn phí, không cần cài đặt, không giới hạn.">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="logo" href="/">TikTok <span>Downloader</span></a>
+      <button id="theme-toggle" class="theme-toggle" title="Đổi giao diện">🌙</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="hero">
+      <h1>Tải video TikTok <em>không logo</em></h1>
+      <p class="sub">Dán link video TikTok, chọn chất lượng, tải về máy — miễn phí, không cần đăng ký.</p>
+
+      <form id="dl-form" class="dl-form" autocomplete="off">
+        <input
+          id="url"
+          type="url"
+          placeholder="Dán link TikTok (video / ảnh / story)..."
+          required
+        >
+        <button type="submit" id="dl-btn" class="dl-btn">Download</button>
+      </form>
+
+      <p id="error" class="error" hidden></p>
+      <p id="status" class="status" hidden></p>
+    </section>
+
+    <section id="result" class="result" hidden></section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <p>Không lưu video trên server — file stream trực tiếp từ CDN.</p>
+      <p class="legal">Dịch vụ không liên kết với ByteDance, TikTok. Chỉ dùng cho mục đích cá nhân.</p>
+    </div>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
